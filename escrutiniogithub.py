@@ -33,11 +33,56 @@ st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
 
 
 # ================== GOOGLE SHEETS ==================
+def _normalize_private_key(pk: str) -> str:
+    """
+    Normaliza la clave PEM para evitar errores binascii/base64:
+    - Convierte '\\n' -> '\n'
+    - Normaliza CRLF/CR -> LF
+    - Reemplaza guiones unicode por '-'
+    - Remueve espacios al inicio/fin de cada línea
+    - Extrae el bloque entre BEGIN/END y reenvuelve base64 a 64 chars/linea
+    """
+    if not isinstance(pk, str):
+        return pk
+
+    s = pk.strip()
+
+    # Normalizaciones de saltos/guiones
+    s = s.replace("\\r\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    s = s.replace("\\n", "\n")
+    s = s.replace("—", "-").replace("–", "-")  # guiones unicode a ASCII
+
+    start = "-----BEGIN PRIVATE KEY-----"
+    end = "-----END PRIVATE KEY-----"
+
+    if start not in s or end not in s:
+        # A veces pegan el JSON entero o falta un salto; intentamos igual limpiar
+        # Si no están los marcadores, devolvemos tal cual (google-auth fallará con mensaje claro)
+        return s
+
+    # Extraer solo el cuerpo base64 entre marcadores
+    before, rest = s.split(start, 1)
+    body, after = rest.split(end, 1)
+
+    # Limpiar cada línea (strip) y descartar líneas vacías
+    lines = [ln.strip() for ln in body.strip().split("\n") if ln.strip()]
+
+    # Dejar solo caracteres base64 válidos
+    b64 = re.sub(r"[^A-Za-z0-9+/=]", "", "".join(lines))
+
+    # Re-envolver a 64 caracteres por línea (estándar PEM)
+    wrapped = "\n".join([b64[i:i + 64] for i in range(0, len(b64), 64)])
+
+    # Armar PEM canónico con \n finales
+    normalized = f"{start}\n{wrapped}\n{end}\n"
+    return normalized
+
+
 @st.cache_resource
 def _gspread_client():
     """
     Crea cliente gspread usando Service Account desde st.secrets.
-    Tolera private_key con '\\n' (backslash-n) y los convierte a saltos reales.
+    Tolera private_key con '\n' mal escapados y formatos PEM irregulares.
     """
     try:
         import gspread
@@ -59,12 +104,11 @@ def _gspread_client():
 
     info = dict(st.secrets["gcp_service_account"])
 
-    # --- Normalización del private_key (tolerar '\n' mal escapados) ---
+    # Normalizar la clave privada (corrige \\n, CRLF, espacios, etc.)
     pk = info.get("private_key", "")
-    if isinstance(pk, str) and "\\n" in pk:
-        info["private_key"] = pk.replace("\\n", "\n")
+    info["private_key"] = _normalize_private_key(pk)
 
-    # Chequeo básico de formato
+    # Validación rápida
     if not (
         isinstance(info.get("private_key"), str)
         and "BEGIN PRIVATE KEY" in info["private_key"]
@@ -73,8 +117,8 @@ def _gspread_client():
         st.error(
             "El `private_key` del Service Account no tiene el formato esperado.\n\n"
             "Opciones válidas en Secrets (TOML):\n"
-            "  • Multilínea con triple comillas:\n"
-            '    private_key = """-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"""  (pegado tal cual)\n'
+            "  • Multilínea con triple comillas (recomendado):\n"
+            '    private_key = """-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"""\n'
             "  • Una sola línea con \\n escapados:\n"
             '    private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"\n'
         )
@@ -84,8 +128,18 @@ def _gspread_client():
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
     ]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
+
+    try:
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(
+            "No se pudo inicializar las credenciales del Service Account.\n"
+            "Revisá que el `private_key` esté completo y sin caracteres extraños.\n\n"
+            f"Detalle: {e}"
+        )
+        st.stop()
 
 
 def _sheet_to_df(gc, sheet_id: str, worksheet_name: str) -> pd.DataFrame:
@@ -386,3 +440,4 @@ with st.expander("🔎 Diagnóstico"):
     st.write("Registros tidy:", long.shape)
     st.write("Mesas distintas:", int(long["MESA_KEY"].nunique()))
     st.write("Alianzas:", sorted([a for a in long["ALIANZA"].dropna().unique()]))
+
