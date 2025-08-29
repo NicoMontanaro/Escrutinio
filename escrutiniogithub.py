@@ -30,7 +30,6 @@ SHEET_NAMES = {
     "raw": "Respuestas_raw",
     "escuelas": "Mapeo_Escuelas_raw",
     "alianzas": "Mapeo_Alianzas_raw",
-    # "padron": "Padron_Departamento_raw"  # se detecta automáticamente
 }
 AUTOREFRESH_SEC = 60
 
@@ -188,10 +187,9 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
 
 @st.cache_data(ttl=AUTOREFRESH_SEC)
-def load_padron(gc=None) -> pd.DataFrame:
+def load_padron() -> pd.DataFrame:
     """Devuelve DEPARTAMENTO | PADRON desde 'Padron_Departamento_raw' si existe, o fallback."""
-    if gc is None:
-        gc = _gspread_client()
+    gc = _gspread_client()
     try:
         sh = gc.open_by_key(SHEET_ID)
         titles = [ws.title for ws in sh.worksheets()]
@@ -448,7 +446,7 @@ if not ali_df.empty:
     with c1:
         st.bar_chart(ali_df.set_index("ALIANZA")["votos"])
     with c2:
-        st.dataframe(ali_df, use_container_width=True)
+        st.dataframe(ali_df, width='stretch')
 else:
     st.info("No hay votos asociados a alianzas con el filtro actual.")
 
@@ -465,7 +463,7 @@ if not part_df.empty:
     with c1:
         st.bar_chart(part_df.set_index("Etiqueta")["votos"])
     with c2:
-        st.dataframe(part_df[["numero_partido", "PARTIDO", "votos", "% sobre válidos"]], use_container_width=True)
+        st.dataframe(part_df[["numero_partido", "PARTIDO", "votos", "% sobre válidos"]], width='stretch')
 else:
     st.info("No hay votos de partidos con el filtro actual.")
 
@@ -481,7 +479,7 @@ pivot_all = (
        .reset_index()
        .sort_values(["DEPARTAMENTO", "MESA_KEY"])
 )
-st.dataframe(pivot_all, use_container_width=True)
+st.dataframe(pivot_all, width='stretch')
 
 # -------- Solo Mesas Testigo --------
 st.subheader("Solo Mesas Testigo – Detalle por Alianza")
@@ -497,7 +495,7 @@ if not testigo_flt.empty:
                    .reset_index()
                    .sort_values("MESA_KEY")
     )
-    st.dataframe(pivot_testigo, use_container_width=True)
+    st.dataframe(pivot_testigo, width='stretch')
 else:
     st.info("No hay mesas testigo con datos bajo los filtros actuales.")
 
@@ -505,8 +503,7 @@ else:
 st.divider()
 st.subheader("Participación – % sobre padrón (según filtros)")
 
-gc = _gspread_client()
-df_pad = load_padron(gc)
+df_pad = load_padron()
 df_mesas = mesa_totales_por_depto(df_raw, df_esc)
 
 mask_turnout = pd.Series(True, index=df_mesas.index)
@@ -545,7 +542,7 @@ with c1:
     else:
         st.info("Aún no hay votos emitidos para los filtros aplicados.")
 with c2:
-    st.dataframe(turnout_total, use_container_width=True)
+    st.dataframe(turnout_total, width='stretch')
 
 # -------- Descargas --------
 st.divider()
@@ -592,4 +589,5 @@ with st.expander("🔎 Diagnóstico"):
     st.write("Mesas distintas:", int(long["MESA_KEY"].nunique()))
     st.write("Alianzas:", sorted([a for a in long["ALIANZA"].dropna().unique()]))
     st.write("Padron total:", int(df_pad["PADRON"].sum()))
+
 
