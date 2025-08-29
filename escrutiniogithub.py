@@ -424,17 +424,14 @@ if ali_sel:
 
 flt = long.loc[mask].copy()
 
-# -------- KPIs --------
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Votos (filtro)", f"{int(flt['votos'].sum()):,}".replace(",", "."))
-col2.metric("Mesas", flt["MESA_KEY"].nunique())
-col3.metric("Alianzas", flt["ALIANZA"].nunique())
-col4.metric("Partidos", flt["PARTIDO"].nunique())
+# -------- Preparación de dataframes para tabs --------
+# KPIs
+total_votos = int(flt['votos'].sum())
+total_mesas = flt['MESA_KEY'].nunique()
+total_alis  = flt['ALIANZA'].nunique()
+total_parts = flt['PARTIDO'].nunique()
 
-st.divider()
-
-# -------- Resultados por Alianza --------
-st.subheader("Resultados por Alianza")
+# Alianzas
 ali_df = (
     flt.dropna(subset=["ALIANZA"])
        .groupby("ALIANZA", as_index=False)["votos"].sum()
@@ -442,16 +439,8 @@ ali_df = (
 )
 if not ali_df.empty:
     ali_df["% sobre válidos"] = (ali_df["votos"] / ali_df["votos"].sum() * 100).round(2)
-    c1, c2 = st.columns([2, 1.2])
-    with c1:
-        st.bar_chart(ali_df.set_index("ALIANZA")["votos"])
-    with c2:
-        st.dataframe(ali_df, width='stretch')
-else:
-    st.info("No hay votos asociados a alianzas con el filtro actual.")
 
-# -------- Resultados por Partido --------
-st.subheader("Resultados por Partido")
+# Partidos
 part_df = (
     flt.groupby(["numero_partido", "PARTIDO"], as_index=False)["votos"].sum()
        .sort_values("votos", ascending=False)
@@ -459,16 +448,8 @@ part_df = (
 if not part_df.empty:
     part_df["Etiqueta"] = part_df["numero_partido"].astype(int).astype(str) + " - " + part_df["PARTIDO"].fillna("")
     part_df["% sobre válidos"] = (part_df["votos"] / part_df["votos"].sum() * 100).round(2)
-    c1, c2 = st.columns([2, 1.2])
-    with c1:
-        st.bar_chart(part_df.set_index("Etiqueta")["votos"])
-    with c2:
-        st.dataframe(part_df[["numero_partido", "PARTIDO", "votos", "% sobre válidos"]], width='stretch')
-else:
-    st.info("No hay votos de partidos con el filtro actual.")
 
-# -------- Detalle por Mesa (todas) --------
-st.subheader("Detalle por Mesa (todas las alianzas)")
+# Mesas (todas)
 pivot_all = (
     flt.dropna(subset=["ALIANZA"])
        .pivot_table(index=["MESA_KEY", "DEPARTAMENTO", "ESTABLECIMIENTO", "TESTIGO_BOOL"],
@@ -479,11 +460,10 @@ pivot_all = (
        .reset_index()
        .sort_values(["DEPARTAMENTO", "MESA_KEY"])
 )
-st.dataframe(pivot_all, width='stretch')
 
-# -------- Solo Mesas Testigo --------
-st.subheader("Solo Mesas Testigo – Detalle por Alianza")
+# Solo Testigo
 testigo_flt = flt.loc[flt["TESTIGO_BOOL"] == True].copy()
+pivot_testigo = pd.DataFrame()
 if not testigo_flt.empty:
     pivot_testigo = (
         testigo_flt.dropna(subset=["ALIANZA"])
@@ -495,14 +475,8 @@ if not testigo_flt.empty:
                    .reset_index()
                    .sort_values("MESA_KEY")
     )
-    st.dataframe(pivot_testigo, width='stretch')
-else:
-    st.info("No hay mesas testigo con datos bajo los filtros actuales.")
 
-# ================== Participación (% sobre padrón) ==================
-st.divider()
-st.subheader("Participación – % sobre padrón (según filtros)")
-
+# Participación sobre padrón
 df_pad = load_padron()
 df_mesas = mesa_totales_por_depto(df_raw, df_esc)
 
@@ -514,80 +488,168 @@ if only_testigo:
 mask_turnout &= df_mesas["MESA_KEY"].between(rango[0], rango[1])
 df_mesas_f = df_mesas.loc[mask_turnout].copy()
 
-g = df_mesas_f.groupby("DEPARTAMENTO", as_index=False)["TOTAL_MESA"].sum().rename(columns={"TOTAL_MESA": "VOTOS_EMITIDOS"})
-g["_key"] = normalize_name(g["DEPARTAMENTO"])
-df_pad = df_pad.copy()
-df_pad["_key"] = normalize_name(df_pad["DEPARTAMENTO"])
-turnout = g.merge(df_pad[["_key", "PADRON"]], on="_key", how="left").drop(columns=["_key"])
-turnout["PADRON"] = turnout["PADRON"].fillna(0).astype(int)
-turnout["% SOBRE PADRON"] = np.where(
-    turnout["PADRON"] > 0,
-    (turnout["VOTOS_EMITIDOS"] / turnout["PADRON"] * 100).round(2),
-    0.0,
-)
-turnout = turnout.sort_values("% SOBRE PADRON", ascending=False)
+turnout = pd.DataFrame(columns=["DEPARTAMENTO","VOTOS_EMITIDOS","PADRON","% SOBRE PADRON"])
+turnout_total = turnout.copy()
+if not df_mesas_f.empty:
+    g = (df_mesas_f.groupby("DEPARTAMENTO", as_index=False)["TOTAL_MESA"]
+                  .sum()
+                  .rename(columns={"TOTAL_MESA": "VOTOS_EMITIDOS"}))
+    g["_key"] = normalize_name(g["DEPARTAMENTO"])
+    df_pad = df_pad.copy()
+    df_pad["_key"] = normalize_name(df_pad["DEPARTAMENTO"])
+    turnout = g.merge(df_pad[["_key", "PADRON"]], on="_key", how="left").drop(columns=["_key"])
+    turnout["PADRON"] = turnout["PADRON"].fillna(0).astype(int)
+    turnout["% SOBRE PADRON"] = np.where(
+        turnout["PADRON"] > 0,
+        (turnout["VOTOS_EMITIDOS"] / turnout["PADRON"] * 100).round(2),
+        0.0,
+    )
+    turnout = turnout.sort_values("% SOBRE PADRON", ascending=False)
 
-total_row = pd.DataFrame({
-    "DEPARTAMENTO": ["TOTAL PROVINCIAL"],
-    "VOTOS_EMITIDOS": [int(df_mesas_f["TOTAL_MESA"].sum())],
-    "PADRON": [int(df_pad["PADRON"].sum())],
-    "% SOBRE PADRON": [round(df_mesas_f["TOTAL_MESA"].sum() / max(1, df_pad["PADRON"].sum()) * 100, 2)]
-})
-turnout_total = pd.concat([turnout, total_row], ignore_index=True)
+    total_row = pd.DataFrame({
+        "DEPARTAMENTO": ["TOTAL PROVINCIAL"],
+        "VOTOS_EMITIDOS": [int(df_mesas_f["TOTAL_MESA"].sum())],
+        "PADRON": [int(df_pad["PADRON"].sum())],
+        "% SOBRE PADRON": [round(df_mesas_f["TOTAL_MESA"].sum() / max(1, df_pad["PADRON"].sum()) * 100, 2)]
+    })
+    turnout_total = pd.concat([turnout, total_row], ignore_index=True)
 
-c1, c2 = st.columns([2, 1.2])
-with c1:
+# ================== TABS ==================
+(
+    tab_resumen,
+    tab_alianzas,
+    tab_partidos,
+    tab_mesas,
+    tab_testigo,
+    tab_participacion,
+    tab_descargas,
+    tab_diag,
+) = st.tabs([
+    "🏁 Resumen",
+    "🧩 Alianzas",
+    "🎟️ Partidos",
+    "🗃️ Mesas",
+    "⭐ Testigo",
+    "📈 Participación",
+    "⬇️ Descargas",
+    "🔧 Diagnóstico",
+])
+
+# ---- Tab Resumen ----
+with tab_resumen:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Votos (filtro)", f"{total_votos:,}".replace(",", "."))
+    c2.metric("Mesas", total_mesas)
+    c3.metric("Alianzas", total_alis)
+    c4.metric("Partidos", total_parts)
+
+    st.divider()
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.markdown("**Top Alianzas**")
+        if not ali_df.empty:
+            st.bar_chart(ali_df.set_index("ALIANZA")["votos"].head(10))
+        else:
+            st.info("Sin datos de alianzas para el filtro.")
+    with cc2:
+        st.markdown("**Top Partidos**")
+        if not part_df.empty:
+            st.bar_chart(part_df.set_index("Etiqueta")["votos"].head(10))
+        else:
+            st.info("Sin datos de partidos para el filtro.")
+
+# ---- Tab Alianzas ----
+with tab_alianzas:
+    st.markdown("### Votos por Alianza")
+    if not ali_df.empty:
+        c1, c2 = st.columns([2, 1.2])
+        with c1:
+            st.bar_chart(ali_df.set_index("ALIANZA")["votos"])
+        with c2:
+            st.dataframe(ali_df, width='stretch')
+    else:
+        st.info("No hay votos asociados a alianzas con el filtro actual.")
+
+# ---- Tab Partidos ----
+with tab_partidos:
+    st.markdown("### Votos por Partido")
+    if not part_df.empty:
+        c1, c2 = st.columns([2, 1.2])
+        with c1:
+            st.bar_chart(part_df.set_index("Etiqueta")["votos"])
+        with c2:
+            st.dataframe(part_df[["numero_partido", "PARTIDO", "votos", "% sobre válidos"]], width='stretch')
+    else:
+        st.info("No hay votos de partidos con el filtro actual.")
+
+# ---- Tab Mesas ----
+with tab_mesas:
+    st.markdown("### Detalle por Mesa (todas las alianzas)")
+    st.dataframe(pivot_all, width='stretch')
+
+# ---- Tab Testigo ----
+with tab_testigo:
+    st.markdown("### Solo Mesas Testigo – Detalle por Alianza")
+    if not pivot_testigo.empty:
+        st.dataframe(pivot_testigo, width='stretch')
+    else:
+        st.info("No hay mesas testigo con datos bajo los filtros actuales.")
+
+# ---- Tab Participación ----
+with tab_participacion:
+    st.markdown("### Participación – % sobre padrón")
     if not turnout.empty:
-        st.bar_chart(turnout.set_index("DEPARTAMENTO")["% SOBRE PADRON"])
+        c1, c2 = st.columns([2, 1.2])
+        with c1:
+            st.bar_chart(turnout.set_index("DEPARTAMENTO")["% SOBRE PADRON"])
+        with c2:
+            st.dataframe(turnout_total, width='stretch')
     else:
         st.info("Aún no hay votos emitidos para los filtros aplicados.")
-with c2:
-    st.dataframe(turnout_total, width='stretch')
 
-# -------- Descargas --------
-st.divider()
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.download_button(
-        "⬇️ CSV – por Alianza (filtro)",
-        data=ali_df.to_csv(index=False).encode("utf-8"),
-        file_name="resultado_por_alianza.csv",
-        mime="text/csv",
-        disabled=ali_df.empty,
-    )
-with c2:
-    st.download_button(
-        "⬇️ CSV – por Partido (filtro)",
-        data=part_df.to_csv(index=False).encode("utf-8"),
-        file_name="resultado_por_partido.csv",
-        mime="text/csv",
-        disabled=part_df.empty,
-    )
-with c3:
-    st.download_button(
-        "⬇️ CSV – detalle por Mesa (filtro)",
-        data=pivot_all.to_csv(index=False).encode("utf-8"),
-        file_name="detalle_por_mesa.csv",
-        mime="text/csv",
-        disabled=pivot_all.empty,
-    )
-with c4:
-    st.download_button(
-        "⬇️ CSV – participación (filtro)",
-        data=turnout_total.to_csv(index=False).encode("utf-8"),
-        file_name="participacion_por_padron.csv",
-        mime="text/csv",
-        disabled=turnout_total.empty,
-    )
+# ---- Tab Descargas ----
+with tab_descargas:
+    st.markdown("### Exportar CSVs (según filtros)")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.download_button(
+            "Por Alianza",
+            data=(ali_df.to_csv(index=False).encode("utf-8") if not ali_df.empty else b""),
+            file_name="resultado_por_alianza.csv",
+            mime="text/csv",
+            disabled=ali_df.empty,
+        )
+    with c2:
+        st.download_button(
+            "Por Partido",
+            data=(part_df.to_csv(index=False).encode("utf-8") if not part_df.empty else b""),
+            file_name="resultado_por_partido.csv",
+            mime="text/csv",
+            disabled=part_df.empty,
+        )
+    with c3:
+        st.download_button(
+            "Detalle por Mesa",
+            data=(pivot_all.to_csv(index=False).encode("utf-8") if not pivot_all.empty else b""),
+            file_name="detalle_por_mesa.csv",
+            mime="text/csv",
+            disabled=pivot_all.empty,
+        )
+    with c4:
+        st.download_button(
+            "Participación",
+            data=(turnout_total.to_csv(index=False).encode("utf-8") if not turnout_total.empty else b""),
+            file_name="participacion_por_padron.csv",
+            mime="text/csv",
+            disabled=turnout_total.empty,
+        )
 
-# -------- Diagnóstico (opcional) --------
-with st.expander("🔎 Diagnóstico"):
+# ---- Tab Diagnóstico ----
+with tab_diag:
     st.write("Respuestas_raw columnas:", list(df_raw.columns)[:10], "… total:", len(df_raw.columns))
     st.write("Mapeo_Escuelas_raw columnas:", list(df_esc.columns))
     st.write("Mapeo_Alianzas_raw columnas:", list(df_ali.columns))
     st.write("Registros tidy:", long.shape)
     st.write("Mesas distintas:", int(long["MESA_KEY"].nunique()))
     st.write("Alianzas:", sorted([a for a in long["ALIANZA"].dropna().unique()]))
-    st.write("Padron total:", int(df_pad["PADRON"].sum()))
-
-
+    st.write("Padrón total:", int(df_pad["PADRON"].sum()))
