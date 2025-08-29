@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 Escrutinio – Dashboard Streamlit
+
 Lee un Google Sheet con hojas:
   - Respuestas_raw
   - Mapeo_Escuelas_raw
   - Mapeo_Alianzas_raw
+  - (opcional) Padron_Departamento_raw  → DEPARTAMENTO | PADRON
 
-Muestra resultados por Partido y por Alianza,
-con filtros por Departamento, rango de Mesa y Solo Testigo.
+Muestra resultados por Partido, por Alianza, detalle por Mesa,
+y Participación (% sobre padrón), con filtros por Departamento,
+rango de Mesa y Solo Testigo.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import List, Tuple
 
 import numpy as np
@@ -26,13 +30,44 @@ SHEET_NAMES = {
     "raw": "Respuestas_raw",
     "escuelas": "Mapeo_Escuelas_raw",
     "alianzas": "Mapeo_Alianzas_raw",
+    # "padron": "Padron_Departamento_raw"  # se detecta automáticamente
 }
 AUTOREFRESH_SEC = 60
 
 st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
 
 
-# ================== GOOGLE SHEETS ==================
+# ================== PADRÓN FALLBACK (por si falta la hoja) ==================
+PADRON_FALLBACK = [
+    {"DEPARTAMENTO": "Capital", "PADRON": 313265},
+    {"DEPARTAMENTO": "Goya", "PADRON": 81590},
+    {"DEPARTAMENTO": "Santo Tome", "PADRON": 55536},
+    {"DEPARTAMENTO": "Paso de los Libres", "PADRON": 48417},
+    {"DEPARTAMENTO": "Ituzaingo", "PADRON": 44736},
+    {"DEPARTAMENTO": "Curuzu Cuatia", "PADRON": 40378},
+    {"DEPARTAMENTO": "Mercedes", "PADRON": 38898},
+    {"DEPARTAMENTO": "Monte Caseros", "PADRON": 34282},
+    {"DEPARTAMENTO": "Esquina", "PADRON": 34192},
+    {"DEPARTAMENTO": "Bella Vista", "PADRON": 33941},
+    {"DEPARTAMENTO": "Lavalle", "PADRON": 29206},
+    {"DEPARTAMENTO": "San Cosme", "PADRON": 26010},
+    {"DEPARTAMENTO": "Saladas", "PADRON": 20974},
+    {"DEPARTAMENTO": "Concepcion", "PADRON": 19913},
+    {"DEPARTAMENTO": "San Roque", "PADRON": 18767},
+    {"DEPARTAMENTO": "San Luis del Palmar", "PADRON": 18572},
+    {"DEPARTAMENTO": "Empedrado", "PADRON": 16253},
+    {"DEPARTAMENTO": "Gral Paz", "PADRON": 15077},
+    {"DEPARTAMENTO": "Gral San Martin", "PADRON": 12512},
+    {"DEPARTAMENTO": "Itati", "PADRON": 10942},
+    {"DEPARTAMENTO": "San Miguel", "PADRON": 10296},
+    {"DEPARTAMENTO": "Mburucuya", "PADRON": 9560},
+    {"DEPARTAMENTO": "Sauce", "PADRON": 8208},
+    {"DEPARTAMENTO": "Gral Alvear", "PADRON": 7304},
+    {"DEPARTAMENTO": "Beron de Astrada", "PADRON": 2787},
+]
+
+
+# ================== GOOGLE SHEETS (credenciales robustas) ==================
 def _normalize_private_key(pk: str) -> str:
     """
     Normaliza la clave PEM para evitar errores binascii/base64:
@@ -46,36 +81,22 @@ def _normalize_private_key(pk: str) -> str:
         return pk
 
     s = pk.strip()
-
-    # Normalizaciones de saltos/guiones
     s = s.replace("\\r\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
     s = s.replace("\\n", "\n")
-    s = s.replace("—", "-").replace("–", "-")  # guiones unicode a ASCII
+    s = s.replace("—", "-").replace("–", "-")
 
     start = "-----BEGIN PRIVATE KEY-----"
     end = "-----END PRIVATE KEY-----"
 
     if start not in s or end not in s:
-        # A veces pegan el JSON entero o falta un salto; intentamos igual limpiar
-        # Si no están los marcadores, devolvemos tal cual (google-auth fallará con mensaje claro)
         return s
 
-    # Extraer solo el cuerpo base64 entre marcadores
-    before, rest = s.split(start, 1)
-    body, after = rest.split(end, 1)
-
-    # Limpiar cada línea (strip) y descartar líneas vacías
+    _, rest = s.split(start, 1)
+    body, _ = rest.split(end, 1)
     lines = [ln.strip() for ln in body.strip().split("\n") if ln.strip()]
-
-    # Dejar solo caracteres base64 válidos
     b64 = re.sub(r"[^A-Za-z0-9+/=]", "", "".join(lines))
-
-    # Re-envolver a 64 caracteres por línea (estándar PEM)
     wrapped = "\n".join([b64[i:i + 64] for i in range(0, len(b64), 64)])
-
-    # Armar PEM canónico con \n finales
-    normalized = f"{start}\n{wrapped}\n{end}\n"
-    return normalized
+    return f"{start}\n{wrapped}\n{end}\n"
 
 
 @st.cache_resource
@@ -103,12 +124,9 @@ def _gspread_client():
         st.stop()
 
     info = dict(st.secrets["gcp_service_account"])
-
-    # Normalizar la clave privada (corrige \\n, CRLF, espacios, etc.)
     pk = info.get("private_key", "")
     info["private_key"] = _normalize_private_key(pk)
 
-    # Validación rápida
     if not (
         isinstance(info.get("private_key"), str)
         and "BEGIN PRIVATE KEY" in info["private_key"]
@@ -169,6 +187,30 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     return df_raw, df_esc, df_ali
 
 
+@st.cache_data(ttl=AUTOREFRESH_SEC)
+def load_padron(gc=None) -> pd.DataFrame:
+    """Devuelve DEPARTAMENTO | PADRON desde 'Padron_Departamento_raw' si existe, o fallback."""
+    if gc is None:
+        gc = _gspread_client()
+    try:
+        sh = gc.open_by_key(SHEET_ID)
+        titles = [ws.title for ws in sh.worksheets()]
+        if "Padron_Departamento_raw" in titles:
+            ws = sh.worksheet("Padron_Departamento_raw")
+            rows = ws.get_all_values()
+            dfp = pd.DataFrame(rows[1:], columns=rows[0]) if rows else pd.DataFrame()
+            if not dfp.empty:
+                dfp["DEPARTAMENTO"] = dfp["DEPARTAMENTO"].astype(str).str.strip()
+                dfp["PADRON"] = pd.to_numeric(
+                    dfp["PADRON"].astype(str).str.replace(".", "", regex=False).str.replace(",", "", regex=False),
+                    errors="coerce"
+                ).fillna(0).astype(int)
+                return dfp
+    except Exception:
+        pass
+    return pd.DataFrame(PADRON_FALLBACK)
+
+
 # ================== HELPERS ==================
 def normalize_mesa(s: pd.Series) -> pd.Series:
     """Convierte 'Mesa 0123' → 123 (Int64)."""
@@ -219,6 +261,61 @@ def tidy_votes(df_raw: pd.DataFrame, party_cols: List[str]) -> pd.DataFrame:
         long["partido_header"].astype(str).str.replace(r"^\s*\d+\s*-\s*", "", regex=True).str.strip()
     )
     return long
+
+
+def normalize_name(s: pd.Series | str) -> pd.Series | str:
+    """Normaliza nombres: sin acentos, minúsculas, 1 espacio."""
+    def _norm_one(x: str) -> str:
+        x = str(x).strip()
+        x = unicodedata.normalize("NFKD", x).encode("ascii", "ignore").decode("ascii")
+        x = re.sub(r"\s+", " ", x).strip().lower()
+        return x
+    if isinstance(s, pd.Series):
+        return s.astype(str).map(_norm_one)
+    return _norm_one(s)
+
+
+def mesa_totales_por_depto(df_raw: pd.DataFrame, df_esc: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve MESA_KEY | DEPARTAMENTO | TESTIGO_BOOL | TOTAL_MESA (int)"""
+    mesa_col = "Mesa" if "Mesa" in df_raw.columns else (find_col(df_raw, r"^\s*mesa\s*$") or "Mesa")
+    tot_col = find_col(df_raw, r"total\s*de\s*votos\s*en\s*la\s*mesa")
+
+    if not tot_col:
+        # Fallback: sumar partidos (y blancos/nulos si estuvieran)
+        party_cols = detect_party_columns(df_raw)
+        df_tmp = df_raw.copy()
+        df_tmp["MESA_KEY"] = normalize_mesa(df_tmp.get(mesa_col, pd.Series(index=df_tmp.index)))
+        party_like = party_cols + [
+            c for c in df_raw.columns
+            if re.search(r"votos?\s+(en\s+)?(blancos|nulos|recurridos|impugnados)", c, re.I)
+        ]
+        for c in party_like:
+            df_tmp[c] = pd.to_numeric(df_tmp[c], errors="coerce").fillna(0).astype(int)
+        df_tot = df_tmp[["MESA_KEY"] + party_like].copy()
+        df_tot["TOTAL_MESA"] = df_tot[party_like].sum(axis=1)
+    else:
+        df_tot = df_raw[[mesa_col, tot_col]].copy()
+        df_tot["MESA_KEY"] = normalize_mesa(df_tot[mesa_col])
+        df_tot["TOTAL_MESA"] = pd.to_numeric(
+            df_tot[tot_col].astype(str).str.replace(".", "", regex=False).str.replace(",", "", regex=False),
+            errors="coerce"
+        ).fillna(0).astype(int)
+
+    # Join a depto y testigo
+    mesa_esc_col = "MESA" if "MESA" in df_esc.columns else (find_col(df_esc, r"\bmesa\b") or "MESA")
+    test_col = "TESTIGO" if "TESTIGO" in df_esc.columns else (find_col(df_esc, r"testig") or "TESTIGO")
+
+    df_e = df_esc.copy()
+    df_e["MESA_KEY"] = normalize_mesa(df_e[mesa_esc_col])
+    df_e["TESTIGO_BOOL"] = bool_from_any(df_e.get(test_col, False))
+
+    out = df_tot.merge(
+        df_e[["MESA_KEY", "DEPARTAMENTO", "TESTIGO_BOOL"]].drop_duplicates("MESA_KEY"),
+        on="MESA_KEY",
+        how="left",
+    )
+    out["DEPARTAMENTO"] = out["DEPARTAMENTO"].fillna("(Sin depto)")
+    return out[["MESA_KEY", "DEPARTAMENTO", "TESTIGO_BOOL", "TOTAL_MESA"]]
 
 
 def prep_data():
@@ -404,9 +501,55 @@ if not testigo_flt.empty:
 else:
     st.info("No hay mesas testigo con datos bajo los filtros actuales.")
 
+# ================== Participación (% sobre padrón) ==================
+st.divider()
+st.subheader("Participación – % sobre padrón (según filtros)")
+
+gc = _gspread_client()
+df_pad = load_padron(gc)
+df_mesas = mesa_totales_por_depto(df_raw, df_esc)
+
+mask_turnout = pd.Series(True, index=df_mesas.index)
+if dept_sel != "(Todos)":
+    mask_turnout &= df_mesas["DEPARTAMENTO"].eq(dept_sel)
+if only_testigo:
+    mask_turnout &= df_mesas["TESTIGO_BOOL"].fillna(False)
+mask_turnout &= df_mesas["MESA_KEY"].between(rango[0], rango[1])
+df_mesas_f = df_mesas.loc[mask_turnout].copy()
+
+g = df_mesas_f.groupby("DEPARTAMENTO", as_index=False)["TOTAL_MESA"].sum().rename(columns={"TOTAL_MESA": "VOTOS_EMITIDOS"})
+g["_key"] = normalize_name(g["DEPARTAMENTO"])
+df_pad = df_pad.copy()
+df_pad["_key"] = normalize_name(df_pad["DEPARTAMENTO"])
+turnout = g.merge(df_pad[["_key", "PADRON"]], on="_key", how="left").drop(columns=["_key"])
+turnout["PADRON"] = turnout["PADRON"].fillna(0).astype(int)
+turnout["% SOBRE PADRON"] = np.where(
+    turnout["PADRON"] > 0,
+    (turnout["VOTOS_EMITIDOS"] / turnout["PADRON"] * 100).round(2),
+    0.0,
+)
+turnout = turnout.sort_values("% SOBRE PADRON", ascending=False)
+
+total_row = pd.DataFrame({
+    "DEPARTAMENTO": ["TOTAL PROVINCIAL"],
+    "VOTOS_EMITIDOS": [int(df_mesas_f["TOTAL_MESA"].sum())],
+    "PADRON": [int(df_pad["PADRON"].sum())],
+    "% SOBRE PADRON": [round(df_mesas_f["TOTAL_MESA"].sum() / max(1, df_pad["PADRON"].sum()) * 100, 2)]
+})
+turnout_total = pd.concat([turnout, total_row], ignore_index=True)
+
+c1, c2 = st.columns([2, 1.2])
+with c1:
+    if not turnout.empty:
+        st.bar_chart(turnout.set_index("DEPARTAMENTO")["% SOBRE PADRON"])
+    else:
+        st.info("Aún no hay votos emitidos para los filtros aplicados.")
+with c2:
+    st.dataframe(turnout_total, use_container_width=True)
+
 # -------- Descargas --------
 st.divider()
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.download_button(
         "⬇️ CSV – por Alianza (filtro)",
@@ -431,6 +574,14 @@ with c3:
         mime="text/csv",
         disabled=pivot_all.empty,
     )
+with c4:
+    st.download_button(
+        "⬇️ CSV – participación (filtro)",
+        data=turnout_total.to_csv(index=False).encode("utf-8"),
+        file_name="participacion_por_padron.csv",
+        mime="text/csv",
+        disabled=turnout_total.empty,
+    )
 
 # -------- Diagnóstico (opcional) --------
 with st.expander("🔎 Diagnóstico"):
@@ -440,4 +591,5 @@ with st.expander("🔎 Diagnóstico"):
     st.write("Registros tidy:", long.shape)
     st.write("Mesas distintas:", int(long["MESA_KEY"].nunique()))
     st.write("Alianzas:", sorted([a for a in long["ALIANZA"].dropna().unique()]))
+    st.write("Padron total:", int(df_pad["PADRON"].sum()))
 
