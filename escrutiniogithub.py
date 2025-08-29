@@ -1,3 +1,17 @@
+# -*- coding: utf-8 -*-
+"""
+Escrutinio – Dashboard Streamlit
+Lee un Google Sheet con hojas:
+  - Respuestas_raw
+  - Mapeo_Escuelas_raw
+  - Mapeo_Alianzas_raw
+
+Muestra resultados por Partido y por Alianza,
+con filtros por Departamento, rango de Mesa y Solo Testigo.
+"""
+
+from __future__ import annotations
+
 import re
 from typing import List, Tuple
 
@@ -5,52 +19,55 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# --- CONFIG ---
+# ================== CONFIG ==================
 SHEET_ID = "1vYiQvkDqdx-zgtRbNPN5_0l2lXAceTF2py4mlM1pK_U"
 SHEET_NAMES = {
     "raw": "Respuestas_raw",
     "escuelas": "Mapeo_Escuelas_raw",
     "alianzas": "Mapeo_Alianzas_raw",
 }
-AUTOREFRESH_SEC = 60  # refresco automático
+AUTOREFRESH_SEC = 60
 
-# --- CARGA DE GOOGLE SHEETS ---
-# Usamos gspread a través de st.secrets (service account).
-# 1) En Streamlit Cloud, agrega st.secrets con la clave:
-#    [gcp_service_account]
-#    type="service_account"
-#    project_id="..."
-#    private_key="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-#    client_email="xxx@yyy.iam.gserviceaccount.com"
-# 2) Comparte el Sheet con ese client_email como Viewer/Editor.
+st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
 
+
+# ================== GOOGLE SHEETS ==================
 @st.cache_resource
 def _gspread_client():
+    """Crea cliente gspread usando Service Account desde st.secrets."""
     try:
         import gspread
         from google.oauth2.service_account import Credentials
     except Exception as e:
+        st.error(
+            "Faltan dependencias para Google Sheets.\n\n"
+            "Instalá con:  python -m pip install -r requirements.txt\n\n"
+            f"Detalle: {e}"
+        )
         st.stop()
 
     if "gcp_service_account" not in st.secrets:
-        st.error("Faltan credenciales en st.secrets['gcp_service_account'].")
+        st.error(
+            "Falta el bloque [gcp_service_account] en Secrets.\n"
+            "Pegá el JSON del Service Account en Settings → Secrets."
+        )
         st.stop()
 
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"])
-    scoped = creds.with_scopes([
+    scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
-    ])
-    return gspread.authorize(scoped)
+    ]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    return gspread.authorize(creds)
+
 
 def _sheet_to_df(gc, sheet_id: str, worksheet_name: str) -> pd.DataFrame:
+    """Lee una worksheet por nombre y devuelve DataFrame (primera fila como encabezados)."""
     sh = gc.open_by_key(sheet_id)
     ws = sh.worksheet(worksheet_name)
     rows = ws.get_all_values()
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows[1:], columns=rows[0])
-    return df
+    return pd.DataFrame(rows[1:], columns=rows[0]) if rows else pd.DataFrame()
+
 
 @st.cache_data(ttl=AUTOREFRESH_SEC)
 def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -60,8 +77,10 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     df_ali = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["alianzas"])
     return df_raw, df_esc, df_ali
 
-# --- NORMALIZACIONES ---
+
+# ================== HELPERS ==================
 def normalize_mesa(s: pd.Series) -> pd.Series:
+    """Convierte 'Mesa 0123' → 123 (Int64)."""
     return (
         s.astype(str)
          .str.replace(r"[^0-9]", "", regex=True)
@@ -69,36 +88,47 @@ def normalize_mesa(s: pd.Series) -> pd.Series:
          .astype("Int64")
     )
 
+
 def bool_from_any(s: pd.Series) -> pd.Series:
-    up = s.astype(str).str.upper().str.strip()
+    """TRUE/1/SI/SÍ/YES/VERDADERO → True."""
+    up = s.astype(str).upper().strip()
     return up.isin(["TRUE", "1", "SI", "SÍ", "YES", "VERDADERO"])
 
+
+def find_col(df: pd.DataFrame, regex: str) -> str | None:
+    for c in df.columns:
+        if re.search(regex, str(c), re.IGNORECASE):
+            return c
+    return None
+
+
 def detect_party_columns(df_raw: pd.DataFrame) -> List[str]:
-    cols = []
-    for c in df_raw.columns:
-        if re.match(r"^\s*\d+", str(c)):  # empieza con número -> partido
-            cols.append(c)
-    return cols
+    """Devuelve encabezados que empiezan con número (columnas de partidos)."""
+    return [c for c in df_raw.columns if re.match(r"^\s*\d+", str(c))]
+
 
 def tidy_votes(df_raw: pd.DataFrame, party_cols: List[str]) -> pd.DataFrame:
-    # Mesa normalizada
-    mesa_key = normalize_mesa(df_raw.get("Mesa", pd.Series(index=df_raw.index)))
+    """Wide → long: una fila por (MESA_KEY, partido) con 'votos'."""
+    mesa_col = "Mesa" if "Mesa" in df_raw.columns else (find_col(df_raw, r"^\s*mesa\s*$") or "Mesa")
     df = df_raw.copy()
-    df.insert(0, "MESA_KEY", mesa_key)
-    # Melt de votos
+    df["MESA_KEY"] = normalize_mesa(df.get(mesa_col, pd.Series(index=df.index)))
+
     long = df.melt(
         id_vars=["MESA_KEY"],
         value_vars=party_cols,
         var_name="partido_header",
-        value_name="votos"
+        value_name="votos",
     )
     long["votos"] = pd.to_numeric(long["votos"], errors="coerce").fillna(0).astype(int)
-    # Número de partido desde el header
-    long["numero_partido"] = (
-        long["partido_header"].astype(str).str.extract(r"^\s*(\d+)", expand=False)
-    )
+    long["numero_partido"] = long["partido_header"].astype(str).str.extract(r"^\s*(\d+)", expand=False)
     long["numero_partido"] = pd.to_numeric(long["numero_partido"], errors="coerce")
-    return long.dropna(subset=["MESA_KEY", "numero_partido"]).astype({"numero_partido": int})
+    long = long.dropna(subset=["MESA_KEY", "numero_partido"]).astype({"numero_partido": int})
+
+    long["PARTIDO_NOMBRE_HEADER"] = (
+        long["partido_header"].astype(str).str.replace(r"^\s*\d+\s*-\s*", "", regex=True).str.strip()
+    )
+    return long
+
 
 def prep_data():
     df_raw, df_esc, df_ali = load_data()
@@ -110,90 +140,83 @@ def prep_data():
     if df_ali.empty:
         st.warning("Mapeo_Alianzas_raw está vacío.")
 
-    # Normalizaciones en mapeos
-    if "MESA" in df_esc.columns:
-        df_esc["MESA_KEY"] = normalize_mesa(df_esc["MESA"])
+    # ---- Escuelas: MESA_KEY, TESTIGO_BOOL, DEPARTAMENTO, ESTABLECIMIENTO
+    mesa_esc_col = "MESA" if "MESA" in df_esc.columns else find_col(df_esc, r"\bmesa\b")
+    if mesa_esc_col:
+        df_esc["MESA_KEY"] = normalize_mesa(df_esc[mesa_esc_col])
     else:
-        # fallback por nombre variante
-        mesa_col = next((c for c in df_esc.columns if re.search(r"\bmesa\b", c, re.I)), None)
-        if mesa_col:
-            df_esc["MESA_KEY"] = normalize_mesa(df_esc[mesa_col])
+        df_esc["MESA_KEY"] = pd.Series(dtype="Int64")
 
-    if "TESTIGO" in df_esc.columns:
-        df_esc["TESTIGO_BOOL"] = bool_from_any(df_esc["TESTIGO"])
+    test_col = "TESTIGO" if "TESTIGO" in df_esc.columns else find_col(df_esc, r"testig")
+    if test_col:
+        df_esc["TESTIGO_BOOL"] = bool_from_any(df_esc[test_col])
     else:
         df_esc["TESTIGO_BOOL"] = False
 
-    # Columnas de partidos (headers que inician con número)
-    party_cols = detect_party_columns(df_raw)
+    # ---- Partidos desde headers
+    parties = detect_party_columns(df_raw)
+    long = tidy_votes(df_raw, parties)
 
-    # Datos tidy de votos
-    long = tidy_votes(df_raw, party_cols)
+    # ---- Alianzas: numero → Alianza
+    num_col = "numero" if "numero" in df_ali.columns else find_col(df_ali, r"^\s*numero\s*$")
+    ali_col = "Alianza" if "Alianza" in df_ali.columns else find_col(df_ali, r"^\s*alianza\s*$")
+    party_name_col = find_col(df_ali, r"Partidos?\s+pol")
 
-    # Join con mapeo alianzas
-    # Espera: Mapeo_Alianzas_raw: numero | Partidos políticos | orden | Alianza
-    ali_num_col = next((c for c in df_ali.columns if re.match(r"^\s*numero\s*$", c, re.I)), None)
-    ali_name_col = next((c for c in df_ali.columns if re.match(r"^\s*alianza\s*$", c, re.I)), None)
-    party_name_col = next((c for c in df_ali.columns if re.search(r"partidos?\s+pol", c, re.I)), None)
-
-    if not ali_num_col or not ali_name_col:
+    if not (num_col and ali_col):
         st.error("En Mapeo_Alianzas_raw deben existir columnas: 'numero' y 'Alianza'.")
         st.stop()
 
-    df_ali["_numero"] = pd.to_numeric(df_ali[ali_num_col], errors="coerce")
-    ali_map = df_ali[["_numero", ali_name_col]].rename(columns={"_numero": "numero_partido", ali_name_col: "ALIANZA"})
+    df_ali["_numero"] = pd.to_numeric(df_ali[num_col], errors="coerce")
+    ali_map = df_ali[["_numero", ali_col]].rename(columns={"_numero": "numero_partido", ali_col: "ALIANZA"})
     long = long.merge(ali_map, on="numero_partido", how="left")
 
-    # Limpiar "No Usar"
-    if not ali_map.empty:
-        long["ALIANZA"] = long["ALIANZA"].fillna("")
-        mask_no_usar = long["ALIANZA"].str.strip().str.match(r"(?i)^\s*no\s*usar\s*$")
-        long.loc[mask_no_usar, "ALIANZA"] = np.nan
+    # Excluir "No Usar"
+    long["ALIANZA"] = long["ALIANZA"].fillna("")
+    no_usar = long["ALIANZA"].str.strip().str.match(r"(?i)^\s*no\s*usar\s*$")
+    long.loc[no_usar, "ALIANZA"] = np.nan
+    long["ALIANZA"] = long["ALIANZA"].where(long["ALIANZA"].notna(), "(Sin alianza)")
 
-    # Join con escuelas (Depto, Testigo)
-    if "MESA_KEY" in df_esc.columns:
-        long = long.merge(
-            df_esc[["MESA_KEY", "DEPARTAMENTO", "ESTABLECIMIENTO", "TESTIGO_BOOL"]],
-            on="MESA_KEY",
-            how="left"
-        )
-    else:
-        long["DEPARTAMENTO"] = np.nan
-        long["ESTABLECIMIENTO"] = np.nan
-        long["TESTIGO_BOOL"] = False
-
-    # Partidos: nombre legible
+    # Nombre de partido
     if party_name_col:
-        name_map = df_ali[["_numero", party_name_col]].rename(columns={"_numero": "numero_partido", party_name_col: "PARTIDO"})
+        name_map = df_ali[["_numero", party_name_col]].rename(
+            columns={"_numero": "numero_partido", party_name_col: "PARTIDO"}
+        )
         long = long.merge(name_map, on="numero_partido", how="left")
     else:
-        # usar el texto del header sin el número
-        long["PARTIDO"] = (
-            long["partido_header"].astype(str)
-                .str.replace(r"^\s*\d+\s*-\s*", "", regex=True)
-                .str.strip()
-        )
+        long["PARTIDO"] = long["PARTIDO_NOMBRE_HEADER"]
+
+    # ---- Join con Escuelas
+    keep_esc = [c for c in ["DEPARTAMENTO", "ESTABLECIMIENTO", "TESTIGO_BOOL"] if c in df_esc.columns]
+    long = long.merge(df_esc[["MESA_KEY"] + keep_esc].drop_duplicates("MESA_KEY"), on="MESA_KEY", how="left")
+    long["DEPARTAMENTO"] = long["DEPARTAMENTO"].where(long["DEPARTAMENTO"].notna(), "(Sin depto)")
 
     return df_raw, df_esc, df_ali, long
 
-# ---------------- UI ----------------
-st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
-st.title("📊 Escrutinio – Resultados por Partido y Alianza")
 
-# Auto-refresh
-st.caption(f"Actualiza cada {AUTOREFRESH_SEC}s")
-st.experimental_rerun  # just reference; (we rely on cache TTL)
+# ================== UI ==================
+st.title("📊 Escrutinio – Resultados por Partido y Alianza")
+st.caption(f"Actualiza cada {AUTOREFRESH_SEC}s (cache TTL)")
+
+# Auto-refresh (si está instalado); si no, botón manual
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=AUTOREFRESH_SEC * 1000, key="data_refresh")
+except Exception:
+    with st.sidebar:
+        if st.button("Actualizar datos ahora"):
+            st.cache_data.clear()
+            st.rerun()
 
 df_raw, df_esc, df_ali, long = prep_data()
 
-# Filtros
+# -------- Filtros --------
 with st.sidebar:
     st.header("Filtros")
-    # Departamentos disponibles
     depts = ["(Todos)"] + sorted([d for d in long["DEPARTAMENTO"].dropna().unique().tolist()])
     dept_sel = st.selectbox("Departamento", depts, index=0)
+
     only_testigo = st.toggle("Solo mesas testigo", value=False)
-    # Rango de mesa
+
     mesas_disponibles = long["MESA_KEY"].dropna().astype(int).sort_values().unique().tolist()
     if mesas_disponibles:
         min_mesa, max_mesa = int(mesas_disponibles[0]), int(mesas_disponibles[-1])
@@ -201,26 +224,30 @@ with st.sidebar:
     else:
         rango = (0, 10**9)
 
-# Aplicar filtros
+    ali_list = sorted([a for a in long["ALIANZA"].dropna().unique().tolist()])
+    ali_sel = st.multiselect("Alianzas (opcional)", ali_list, default=ali_list)
+
 mask = pd.Series(True, index=long.index)
 if dept_sel != "(Todos)":
     mask &= (long["DEPARTAMENTO"] == dept_sel)
 if only_testigo:
     mask &= (long["TESTIGO_BOOL"] == True)
 mask &= long["MESA_KEY"].between(rango[0], rango[1])
+if ali_sel:
+    mask &= long["ALIANZA"].isin(ali_sel)
 
 flt = long.loc[mask].copy()
 
-# KPIs
-total_votos_validos = int(flt["votos"].sum())
-total_mesas = flt["MESA_KEY"].nunique()
-total_partidos = flt["PARTIDO"].nunique()
-col1, col2, col3 = st.columns(3)
-col1.metric("Votos (filtro aplicado)", f"{total_votos_validos:,}".replace(",", "."))
-col2.metric("Mesas consideradas", total_mesas)
-col3.metric("Partidos distintos", total_partidos)
+# -------- KPIs --------
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Votos (filtro)", f"{int(flt['votos'].sum()):,}".replace(",", "."))
+col2.metric("Mesas", flt["MESA_KEY"].nunique())
+col3.metric("Alianzas", flt["ALIANZA"].nunique())
+col4.metric("Partidos", flt["PARTIDO"].nunique())
 
-# ---------- Resultados por ALIANZA ----------
+st.divider()
+
+# -------- Resultados por Alianza --------
 st.subheader("Resultados por Alianza")
 ali_df = (
     flt.dropna(subset=["ALIANZA"])
@@ -237,7 +264,7 @@ if not ali_df.empty:
 else:
     st.info("No hay votos asociados a alianzas con el filtro actual.")
 
-# ---------- Resultados por PARTIDO ----------
+# -------- Resultados por Partido --------
 st.subheader("Resultados por Partido")
 part_df = (
     flt.groupby(["numero_partido", "PARTIDO"], as_index=False)["votos"].sum()
@@ -254,8 +281,22 @@ if not part_df.empty:
 else:
     st.info("No hay votos de partidos con el filtro actual.")
 
-# ---------- Solo mesas testigo (detalle por mesa) ----------
-st.subheader("Detalle por Mesas Testigo (por Alianza)")
+# -------- Detalle por Mesa (todas) --------
+st.subheader("Detalle por Mesa (todas las alianzas)")
+pivot_all = (
+    flt.dropna(subset=["ALIANZA"])
+       .pivot_table(index=["MESA_KEY", "DEPARTAMENTO", "ESTABLECIMIENTO", "TESTIGO_BOOL"],
+                    columns="ALIANZA",
+                    values="votos",
+                    aggfunc="sum",
+                    fill_value=0)
+       .reset_index()
+       .sort_values(["DEPARTAMENTO", "MESA_KEY"])
+)
+st.dataframe(pivot_all, use_container_width=True)
+
+# -------- Solo Mesas Testigo --------
+st.subheader("Solo Mesas Testigo – Detalle por Alianza")
 testigo_flt = flt.loc[flt["TESTIGO_BOOL"] == True].copy()
 if not testigo_flt.empty:
     pivot_testigo = (
@@ -272,18 +313,39 @@ if not testigo_flt.empty:
 else:
     st.info("No hay mesas testigo con datos bajo los filtros actuales.")
 
-# ---------- Tabla por mesa (todas) ----------
-with st.expander("Ver tabla por mesa (todas las alianzas y filtros aplicados)"):
-    pivot_all = (
-        flt.dropna(subset=["ALIANZA"])
-           .pivot_table(index=["MESA_KEY", "DEPARTAMENTO", "ESTABLECIMIENTO", "TESTIGO_BOOL"],
-                        columns="ALIANZA",
-                        values="votos",
-                        aggfunc="sum",
-                        fill_value=0)
-           .reset_index()
-           .sort_values(["DEPARTAMENTO", "MESA_KEY"])
+# -------- Descargas --------
+st.divider()
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.download_button(
+        "⬇️ CSV – por Alianza (filtro)",
+        data=ali_df.to_csv(index=False).encode("utf-8"),
+        file_name="resultado_por_alianza.csv",
+        mime="text/csv",
+        disabled=ali_df.empty,
     )
-    st.dataframe(pivot_all, use_container_width=True)
+with c2:
+    st.download_button(
+        "⬇️ CSV – por Partido (filtro)",
+        data=part_df.to_csv(index=False).encode("utf-8"),
+        file_name="resultado_por_partido.csv",
+        mime="text/csv",
+        disabled=part_df.empty,
+    )
+with c3:
+    st.download_button(
+        "⬇️ CSV – detalle por Mesa (filtro)",
+        data=pivot_all.to_csv(index=False).encode("utf-8"),
+        file_name="detalle_por_mesa.csv",
+        mime="text/csv",
+        disabled=pivot_all.empty,
+    )
 
-st.caption("Tip: si algún valor se ve raro, revisá que los encabezados de partidos en Respuestas_raw empiecen con número y que 'numero'/'Alianza' existan en Mapeo_Alianzas_raw. ‘No Usar’ se excluye automáticamente.")
+# -------- Diagnóstico (opcional) --------
+with st.expander("🔎 Diagnóstico"):
+    st.write("Respuestas_raw columnas:", list(df_raw.columns)[:10], "… total:", len(df_raw.columns))
+    st.write("Mapeo_Escuelas_raw columnas:", list(df_esc.columns))
+    st.write("Mapeo_Alianzas_raw columnas:", list(df_ali.columns))
+    st.write("Registros tidy:", long.shape)
+    st.write("Mesas distintas:", int(long["MESA_KEY"].nunique()))
+    st.write("Alianzas:", sorted([a for a in long["ALIANZA"].dropna().unique()]))
