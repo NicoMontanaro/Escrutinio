@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+
 # ================== CONFIG ==================
 SHEET_ID = "1vYiQvkDqdx-zgtRbNPN5_0l2lXAceTF2py4mlM1pK_U"
 SHEET_NAMES = {
@@ -34,7 +35,10 @@ st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
 # ================== GOOGLE SHEETS ==================
 @st.cache_resource
 def _gspread_client():
-    """Crea cliente gspread usando Service Account desde st.secrets."""
+    """
+    Crea cliente gspread usando Service Account desde st.secrets.
+    Tolera private_key con '\\n' (backslash-n) y los convierte a saltos reales.
+    """
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -53,11 +57,34 @@ def _gspread_client():
         )
         st.stop()
 
+    info = dict(st.secrets["gcp_service_account"])
+
+    # --- Normalización del private_key (tolerar '\n' mal escapados) ---
+    pk = info.get("private_key", "")
+    if isinstance(pk, str) and "\\n" in pk:
+        info["private_key"] = pk.replace("\\n", "\n")
+
+    # Chequeo básico de formato
+    if not (
+        isinstance(info.get("private_key"), str)
+        and "BEGIN PRIVATE KEY" in info["private_key"]
+        and "END PRIVATE KEY" in info["private_key"]
+    ):
+        st.error(
+            "El `private_key` del Service Account no tiene el formato esperado.\n\n"
+            "Opciones válidas en Secrets (TOML):\n"
+            "  • Multilínea con triple comillas:\n"
+            '    private_key = """-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"""  (pegado tal cual)\n'
+            "  • Una sola línea con \\n escapados:\n"
+            '    private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"\n'
+        )
+        st.stop()
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
     ]
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
 
@@ -72,9 +99,19 @@ def _sheet_to_df(gc, sheet_id: str, worksheet_name: str) -> pd.DataFrame:
 @st.cache_data(ttl=AUTOREFRESH_SEC)
 def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     gc = _gspread_client()
-    df_raw = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["raw"])
-    df_esc = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["escuelas"])
-    df_ali = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["alianzas"])
+    try:
+        df_raw = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["raw"])
+        df_esc = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["escuelas"])
+        df_ali = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["alianzas"])
+    except Exception as e:
+        st.error(
+            "No se pudo abrir el Google Sheet. Verificá:\n"
+            "  • Que compartiste el archivo con el client_email del Service Account (Viewer/Editor)\n"
+            "  • Que los nombres de hojas coinciden exactamente\n"
+            "  • Que las APIs de Sheets y Drive están habilitadas en tu proyecto\n\n"
+            f"Detalle: {e}"
+        )
+        st.stop()
     return df_raw, df_esc, df_ali
 
 
@@ -83,15 +120,15 @@ def normalize_mesa(s: pd.Series) -> pd.Series:
     """Convierte 'Mesa 0123' → 123 (Int64)."""
     return (
         s.astype(str)
-         .str.replace(r"[^0-9]", "", regex=True)
-         .replace({"": np.nan})
-         .astype("Int64")
+        .str.replace(r"[^0-9]", "", regex=True)
+        .replace({"": np.nan})
+        .astype("Int64")
     )
 
 
 def bool_from_any(s: pd.Series) -> pd.Series:
     """TRUE/1/SI/SÍ/YES/VERDADERO → True."""
-    up = s.astype(str).upper().strip()
+    up = s.astype(str).str.upper().str.strip()
     return up.isin(["TRUE", "1", "SI", "SÍ", "YES", "VERDADERO"])
 
 
@@ -176,7 +213,7 @@ def prep_data():
     long.loc[no_usar, "ALIANZA"] = np.nan
     long["ALIANZA"] = long["ALIANZA"].where(long["ALIANZA"].notna(), "(Sin alianza)")
 
-    # Nombre de partido
+    # Nombre de partido (desde mapeo si está, o desde header)
     if party_name_col:
         name_map = df_ali[["_numero", party_name_col]].rename(
             columns={"_numero": "numero_partido", party_name_col: "PARTIDO"}
