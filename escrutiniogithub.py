@@ -1,18 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Escrutinio – Dashboard Streamlit (incluye pestaña de Municipios y quita Partidos)
-# -*- coding: utf-8 -*-
-"""
-Escrutinio – Dashboard Streamlit
+Escrutinio - Dashboard Streamlit
 Incluye pestaña de Municipios (usa Mapeo_Mesa_Municipio_raw) y cálculo de % escrutado.
 
 Google Sheet requerido (mismo ID para todas las hojas):
   - Respuestas_raw
-  - Mapeo_Escuelas_raw                 → DEPARTAMENTO | ESTABLECIMIENTO | MESA | TESTIGO
-  - Mapeo_Alianzas_raw                 → numero | Partidos políticos | orden | Alianza
-  - Mapeo_Mesa_Municipio_raw           → MESA | MUNICIPIO | DEPARTAMENTO
-  - (opcional) Padron_Departamento_raw → DEPARTAMENTO | PADRON
-  - (opcional) Padron_Municipio_raw    → (DEPARTAMENTO) | MUNICIPIO | PADRON
+  - Mapeo_Escuelas_raw                 -> DEPARTAMENTO | ESTABLECIMIENTO | MESA | TESTIGO
+  - Mapeo_Alianzas_raw                 -> numero | Partidos políticos | orden | Alianza
+  - Mapeo_Mesa_Municipio_raw           -> MESA | MUNICIPIO | DEPARTAMENTO
+  - (opcional) Padron_Departamento_raw -> DEPARTAMENTO | PADRON
+  - (opcional) Padron_Municipio_raw    -> (DEPARTAMENTO) | MUNICIPIO | PADRON
 
 Secrets (/.streamlit/secrets.toml):
 [gcp_service_account]
@@ -46,9 +43,9 @@ SHEET_NAMES = {
 AUTOREFRESH_SEC = 180      # 3 minutos
 TOTAL_MESAS_PROV = 2808    # objetivo (footer)
 
-st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
+st.set_page_config(page_title="Escrutinio - Dashboard", layout="wide")
 
-# ================== PADRÓN FALLBACK ==================
+# ================== PADRON FALLBACK ==================
 PADRON_FALLBACK = [
     {"DEPARTAMENTO": "Capital", "PADRON": 313265},
     {"DEPARTAMENTO": "Goya", "PADRON": 81590},
@@ -100,7 +97,7 @@ def _gspread_client():
         import gspread
         from google.oauth2.service_account import Credentials
     except Exception as e:
-        st.error("Faltan dependencias (gspread/google-auth). Instalá desde requirements.txt\n\n" + str(e))
+        st.error("Faltan dependencias (gspread/google-auth). Instalar desde requirements.txt\n\n" + str(e))
         st.stop()
 
     if "gcp_service_account" not in st.secrets:
@@ -336,15 +333,13 @@ def prep_data():
     long = long.merge(df_esc[["MESA_KEY"] + keep_esc].drop_duplicates("MESA_KEY"), on="MESA_KEY", how="left")
     long["DEPARTAMENTO"] = long["DEPARTAMENTO"].where(long["DEPARTAMENTO"].notna(), "(Sin depto)")
 
-    # ========= MERGE ROBUSTO con Mapeo_Mesa_Municipio_raw (evita KeyError *_MAP) =========
+    # ========= MERGE ROBUSTO con Mapeo_Mesa_Municipio_raw =========
     if not df_muni_norm.empty:
         long = long.merge(df_muni_norm, on="MESA_KEY", how="left", suffixes=("", "_MAP"))
 
-        # detectar nombres reales post-merge
         muni_right = "MUNICIPIO_MAP" if "MUNICIPIO_MAP" in long.columns else ("MUNICIPIO" if "MUNICIPIO" in long.columns else None)
         dep_right  = "DEPARTAMENTO_MAP" if "DEPARTAMENTO_MAP" in long.columns else ("DEPARTAMENTO" if "DEPARTAMENTO" in long.columns else None)
 
-        # coalesce MUNICIPIO (prioridad al mapeo)
         if muni_right:
             if "MUNICIPIO" not in long.columns or muni_right == "MUNICIPIO":
                 long["MUNICIPIO"] = long[muni_right]
@@ -355,7 +350,6 @@ def prep_data():
                 long["MUNICIPIO"] = np.nan
         long["MUNICIPIO"] = long["MUNICIPIO"].fillna("(Sin municipio)")
 
-        # coalesce DEPARTAMENTO si faltaba o "(Sin depto)"
         if dep_right:
             long["DEPARTAMENTO"] = long.get("DEPARTAMENTO", np.nan)
             long["DEPARTAMENTO"] = long["DEPARTAMENTO"].where(
@@ -363,7 +357,6 @@ def prep_data():
                 long[dep_right]
             )
 
-        # limpiar columnas *_MAP sobrantes
         for c in ["MUNICIPIO_MAP", "DEPARTAMENTO_MAP"]:
             if c in long.columns and c not in ["MUNICIPIO", "DEPARTAMENTO"]:
                 long.drop(columns=[c], inplace=True, errors="ignore")
@@ -387,7 +380,6 @@ def prep_data():
         muni_right = "MUNICIPIO_MAP" if "MUNICIPIO_MAP" in df_mesas_all.columns else ("MUNICIPIO" if "MUNICIPIO" in df_mesas_all.columns else None)
         dep_right  = "DEPARTAMENTO_MAP" if "DEPARTAMENTO_MAP" in df_mesas_all.columns else ("DEPARTAMENTO" if "DEPARTAMENTO" in df_mesas_all.columns else None)
 
-        # MUNICIPIO (si no existe aún, tomar el del mapeo; si existe, completar nulos)
         if muni_right:
             if "MUNICIPIO" not in df_mesas_all.columns or muni_right == "MUNICIPIO":
                 df_mesas_all["MUNICIPIO"] = df_mesas_all[muni_right]
@@ -398,7 +390,6 @@ def prep_data():
                 df_mesas_all["MUNICIPIO"] = np.nan
         df_mesas_all["MUNICIPIO"] = df_mesas_all["MUNICIPIO"].fillna("(Sin municipio)")
 
-        # DEPARTAMENTO: completar si estaba vacío o "(Sin depto)"
         if dep_right:
             df_mesas_all["DEPARTAMENTO"] = df_mesas_all["DEPARTAMENTO"].where(
                 df_mesas_all["DEPARTAMENTO"].notna() & (df_mesas_all["DEPARTAMENTO"] != "(Sin depto)"),
@@ -412,7 +403,7 @@ def prep_data():
         if "MUNICIPIO" not in df_mesas_all.columns:
             df_mesas_all["MUNICIPIO"] = "(Sin municipio)"
 
-    # Diagnóstico de discrepancias de departamento
+    # Diagnostico de discrepancias de departamento
     dept_mismatch = pd.DataFrame()
     if not df_muni_norm.empty and "DEPARTAMENTO" in df_esc.columns:
         d1 = df_esc[["MESA_KEY", "DEPARTAMENTO"]].drop_duplicates("MESA_KEY").rename(columns={"DEPARTAMENTO": "DEP_ESC"})
@@ -423,7 +414,7 @@ def prep_data():
     return df_raw, df_esc, df_ali, long, df_mesas_all, dept_mismatch
 
 # ================== UI ==================
-st.title("📊 Escrutinio – Alianzas, Departamentos y Municipios")
+st.title("📊 Escrutinio - Alianzas, Departamentos y Municipios")
 st.caption(f"Actualiza cada {AUTOREFRESH_SEC}s (cache TTL)")
 
 # Auto-refresh
@@ -471,7 +462,7 @@ if only_testigo:
 mask &= long["MESA_KEY"].between(rango[0], rango[1])
 flt = long.loc[mask].copy()
 
-# Métrica: % escrutado provincial (antes de tabs)
+# % escrutado provincial
 df_pad_depto = load_padron_depto()
 total_emitidos_prov = int(df_mesas_all["TOTAL_MESA"].sum())
 total_padron_prov   = int(df_pad_depto["PADRON"].sum())
@@ -580,7 +571,7 @@ total_mesas_plan = int(df_esc["MESA_KEY"].nunique())
 mesas_escrutadas = int(df_mesas_all.loc[df_mesas_all["TOTAL_MESA"] > 0, "MESA_KEY"].nunique())
 pct_mesas_escrutadas = (mesas_escrutadas / total_mesas_plan * 100) if total_mesas_plan > 0 else 0.0
 
-# 6) Diagnóstico – duplicados + discrepancias
+# Diagnostico: duplicados
 raw_mesa_col = "Mesa" if "Mesa" in df_raw.columns else (find_col(df_raw, r"^\s*mesa\s*$") or "Mesa")
 df_raw["_MESA_KEY"] = normalize_mesa(df_raw.get(raw_mesa_col, pd.Series(index=df_raw.index)))
 ser_mesas = df_raw["_MESA_KEY"].dropna().astype("Int64")
@@ -645,7 +636,7 @@ with tab_muni:
         st.dataframe(muni_res[cols], width='stretch')
 
 with tab_testigo:
-    st.markdown("#### Solo Mesas Testigo – Votos por Alianza")
+    st.markdown("#### Solo Mesas Testigo - Votos por Alianza")
     c1, c2 = st.columns([2, 1.2])
     with c1:
         if not ali_testigo.empty:
@@ -658,7 +649,7 @@ with tab_testigo:
 with tab_mesas:
     st.markdown("#### Detalle por Mesa (todas las alianzas)")
     st.dataframe(pivot_all, height=520, width='stretch')
-    st.caption(f"**% de mesas escrutadas (provincial)**: {mesas_escrutadas} / {total_mesas_plan} = {pct_mesas_escrutadas:.2f}%")
+    st.caption(f"% de mesas escrutadas (provincial): {mesas_escrutadas} / {total_mesas_plan} = {pct_mesas_escrutadas:.2f}%")
 
 with tab_diag:
     st.markdown("#### Mesas duplicadas en Respuestas_raw")
@@ -676,7 +667,8 @@ with tab_diag:
 
 # ================== FOOTER ==================
 st.markdown("---")
-st.caption(f"**Mesas cargadas (TOTAL_MESA > 0):** {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
+st.caption(f"Mesas cargadas (TOTAL_MESA > 0): {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
+
 
 
 
