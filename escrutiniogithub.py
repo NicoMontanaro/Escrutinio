@@ -31,7 +31,7 @@ SHEET_NAMES = {
     "escuelas": "Mapeo_Escuelas_raw",
     "alianzas": "Mapeo_Alianzas_raw",
 }
-AUTOREFRESH_SEC = 60
+AUTOREFRESH_SEC = 180  # 3 minutos
 TOTAL_MESAS_PROV = 2808  # para footer
 
 st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
@@ -344,7 +344,7 @@ def prep_data():
 st.title("📊 Escrutinio – Resultados por Alianza, Departamento y Partido")
 st.caption(f"Actualiza cada {AUTOREFRESH_SEC}s (cache TTL)")
 
-# Auto-refresh si está instalado
+# Auto-refresh (3 minutos)
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=AUTOREFRESH_SEC * 1000, key="data_refresh")
@@ -465,7 +465,6 @@ pct_mesas_escrutadas = (mesas_escrutadas / total_mesas_plan * 100) if total_mesa
 # 6) Diagnóstico – mesas duplicadas en Respuestas_raw (robusto para pandas 2.x)
 raw_mesa_col = "Mesa" if "Mesa" in df_raw.columns else (find_col(df_raw, r"^\s*mesa\s*$") or "Mesa")
 df_raw["_MESA_KEY"] = normalize_mesa(df_raw.get(raw_mesa_col, pd.Series(index=df_raw.index)))
-
 ser_mesas = df_raw["_MESA_KEY"].dropna().astype("Int64")
 dupes_count = (
     ser_mesas.value_counts(dropna=True)            # index=MESA_KEY, values=CANTIDAD_CARGAS
@@ -557,11 +556,7 @@ with tab_diag:
     else:
         st.success("No se detectaron mesas duplicadas en Respuestas_raw.")
 
-# ================== FOOTER ==================
+# ================== FOOTER (ÚNICA línea de 'Mesas cargadas') ==================
 st.markdown("---")
 st.caption(f"**Mesas cargadas (TOTAL_MESA > 0):** {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
 
-
-# ================== FOOTER ==================
-st.markdown("---")
-st.caption(f"**Mesas cargadas:** {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
