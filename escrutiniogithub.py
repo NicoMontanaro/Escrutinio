@@ -558,5 +558,5 @@ with tab_diag:
 
 # ================== FOOTER (ÚNICA línea de 'Mesas cargadas') ==================
 st.markdown("---")
-st.caption(f"**Mesas cargadas (TOTAL_MESA > 0):** {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
+st.caption(f"**Mesas cargadas:** {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
 
