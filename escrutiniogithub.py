@@ -10,7 +10,8 @@ Hojas requeridas en el Google Sheet:
 
 Muestra:
 - % escrutado (provincial)
-- Tabs: Alianzas, Departamentos, Partidos, Testigo, Mesas (detalle + % mesas escrutadas)
+- Tabs: Alianzas, Departamentos, Partidos, Testigo, Mesas (detalle), Diagnóstico
+- Footer con Mesas cargadas / 2808
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ SHEET_NAMES = {
     "alianzas": "Mapeo_Alianzas_raw",
 }
 AUTOREFRESH_SEC = 60
+TOTAL_MESAS_PROV = 2808  # para footer
 
 st.set_page_config(page_title="Escrutinio – Dashboard", layout="wide")
 
@@ -460,13 +462,25 @@ total_mesas_plan = int(df_esc["MESA_KEY"].nunique())
 mesas_escrutadas = int(df_mesas_all.loc[df_mesas_all["TOTAL_MESA"] > 0, "MESA_KEY"].nunique())
 pct_mesas_escrutadas = (mesas_escrutadas / total_mesas_plan * 100) if total_mesas_plan > 0 else 0.0
 
+# 6) Diagnóstico – mesas duplicadas en Respuestas_raw
+raw_mesa_col = "Mesa" if "Mesa" in df_raw.columns else (find_col(df_raw, r"^\s*mesa\s*$") or "Mesa")
+df_raw["_MESA_KEY"] = normalize_mesa(df_raw.get(raw_mesa_col, pd.Series(index=df_raw.index)))
+dupes_count = (
+    df_raw["_MESA_KEY"]
+    .value_counts(dropna=True)
+    .reset_index()
+    .rename(columns={"index": "MESA_KEY", "_MESA_KEY": "CANTIDAD_CARGAS"})
+)
+dupes_count = dupes_count[dupes_count["CANTIDAD_CARGAS"] > 1].sort_values(["CANTIDAD_CARGAS", "MESA_KEY"], ascending=[False, True])
+
 # ========= TABS =========
-tab_ali, tab_dept, tab_part, tab_testigo, tab_mesas = st.tabs([
+tab_ali, tab_dept, tab_part, tab_testigo, tab_mesas, tab_diag = st.tabs([
     "🧩 Alianzas",
     "🏙️ Departamentos",
     "🎟️ Partidos",
     "⭐ Testigo",
     "🗃️ Mesas (detalle)",
+    "🔧 Diagnóstico",
 ])
 
 # ---- Tab 1: Alianzas (gráfico + tabla lado a lado)
@@ -528,3 +542,16 @@ with tab_mesas:
     st.caption(
         f"**% de mesas escrutadas (provincial)**: {mesas_escrutadas} / {total_mesas_plan} = {pct_mesas_escrutadas:.2f}%"
     )
+
+# ---- Tab 6: Diagnóstico (mesas duplicadas)
+with tab_diag:
+    st.markdown("#### Mesas duplicadas en Respuestas_raw")
+    if not dupes_count.empty:
+        st.dataframe(dupes_count.rename(columns={"MESA_KEY": "Mesa", "CANTIDAD_CARGAS": "Cargas"}), width='stretch')
+        st.info("Sugerencia: revisar estas mesas en Respuestas_raw para decidir cuál entrada mantener.")
+    else:
+        st.success("No se detectaron mesas duplicadas en Respuestas_raw.")
+
+# ================== FOOTER ==================
+st.markdown("---")
+st.caption(f"**Mesas cargadas:** {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
