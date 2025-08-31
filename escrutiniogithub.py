@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Escrutinio - Dashboard Streamlit (Completo)
+Escrutinio - Dashboard Streamlit
 Reglas de origen:
 - DEPARTAMENTO: desde Mapeo_Escuelas_raw
 - MUNICIPIO:   desde Mapeo_Mesa_Municipio_raw
@@ -172,7 +172,7 @@ def load_padron_depto() -> pd.DataFrame:
 
 @st.cache_data(ttl=AUTOREFRESH_SEC)
 def load_padron_municipio() -> pd.DataFrame:
-    """Lee Padron_Municipio_raw (MUNICIPIO y PADRON/VOTANTES). Devuelve: MUNICIPIO, PADRON, (_opcional DEPARTAMENTO)."""
+    """Lee Padron_Municipio_raw (MUNICIPIO y PADRON/VOTANTES). Devuelve: MUNICIPIO, PADRON, (opcional DEPARTAMENTO)."""
     gc = _gspread_client()
     try:
         sh = gc.open_by_key(SHEET_ID)
@@ -279,7 +279,7 @@ def mesa_totales(df_raw: pd.DataFrame) -> pd.DataFrame:
         ).fillna(0).astype(int)
         return df_tot[["MESA_KEY", "TOTAL_MESA"]]
 
-# ======== NUEVAS: % por alianza (sobre válidos y sobre padrón) ========
+# ======== PIVOTS DE % POR ALIANZA ========
 def pivot_pct_valid(df_long: pd.DataFrame, region_cols: list[str]) -> pd.DataFrame:
     """% de votos por alianza dentro de cada región (suma 100% por región)."""
     g = (df_long.dropna(subset=["ALIANZA"])
@@ -292,7 +292,7 @@ def pivot_pct_valid(df_long: pd.DataFrame, region_cols: list[str]) -> pd.DataFra
     return pvt
 
 def pivot_pct_padron_depto(df_long: pd.DataFrame) -> pd.DataFrame:
-    """% de votos por alianza sobre padrón del DEPARTAMENTO (requiere Padron_Departamento_raw)."""
+    """% de votos por alianza sobre padrón del DEPARTAMENTO."""
     pad = load_padron_depto().copy()
     if pad.empty:
         return pd.DataFrame()
@@ -308,7 +308,7 @@ def pivot_pct_padron_depto(df_long: pd.DataFrame) -> pd.DataFrame:
     return pvt
 
 def pivot_pct_padron_muni(df_long: pd.DataFrame) -> pd.DataFrame:
-    """% de votos por alianza sobre padrón del MUNICIPIO (requiere Padron_Municipio_raw)."""
+    """% de votos por alianza sobre padrón del MUNICIPIO."""
     pad = load_padron_municipio().copy()
     if pad.empty:
         return pd.DataFrame()
@@ -499,17 +499,14 @@ st.subheader("Progreso provincial")
 st.metric("Escrutado", f"{pct_escrutado_prov:.2f}%", help="(Votos emitidos de todas las mesas) / (Padrón total)")
 st.divider()
 
-# -------- Datos base para tabs --------
-# 1) Alianzas (global con filtros)
-ali_df = (
+# -------- Datos base generales --------
+# Para % por alianza sobre válidos
+ali_flt = (
     flt.dropna(subset=["ALIANZA"])
-       .groupby("ALIANZA", as_index=False)["votos"].sum()
-       .sort_values("votos", ascending=False)
+       .groupby(["DEPARTAMENTO", "MUNICIPIO", "ALIANZA"], as_index=False)["votos"].sum()
 )
-if not ali_df.empty:
-    ali_df["% sobre válidos"] = (ali_df["votos"] / ali_df["votos"].sum() * 100).round(2)
 
-# 2) Departamentos – totales y % sobre padrón
+# Para tablas de totales y padrón por departamento
 df_mesas_f = df_mesas_all.copy()
 if dept_sel != "(Todos)":
     df_mesas_f = df_mesas_f[df_mesas_f["DEPARTAMENTO"] == dept_sel]
@@ -537,32 +534,7 @@ dept_res["% SOBRE PADRON"] = np.where(
 )
 dept_res = dept_res.sort_values("VOTOS_EMITIDOS", ascending=False)
 
-# 2.b) Departamentos – % por ALIANZA (válidos y padrón)
-dept_ali = (
-    flt.dropna(subset=["ALIANZA"])
-       .groupby(["DEPARTAMENTO", "ALIANZA"], as_index=False)["votos"]
-       .sum()
-)
-dept_tot_valid = flt.groupby("DEPARTAMENTO", as_index=False)["votos"].sum().rename(columns={"votos":"VOTOS_TOT_DEPT"})
-dept_ali = dept_ali.merge(dept_tot_valid, on="DEPARTAMENTO", how="left")
-dept_ali["% sobre válidos (depto)"] = np.where(
-    dept_ali["VOTOS_TOT_DEPT"] > 0,
-    (dept_ali["votos"] / dept_ali["VOTOS_TOT_DEPT"] * 100).round(2),
-    0.0
-)
-pad_d = df_pad_depto.copy()
-pad_d["_dkey"] = normalize_name(pad_d["DEPARTAMENTO"])
-dept_ali["_dkey"] = normalize_name(dept_ali["DEPARTAMENTO"])
-dept_ali = dept_ali.merge(pad_d[["_dkey", "PADRON"]], on="_dkey", how="left").drop(columns=["_dkey"])
-dept_ali["PADRON"] = dept_ali["PADRON"].fillna(0).astype(int)
-dept_ali["% sobre padrón (depto)"] = np.where(
-    dept_ali["PADRON"] > 0,
-    (dept_ali["votos"] / dept_ali["PADRON"] * 100).round(2),
-    0.0
-)
-dept_ali = dept_ali.sort_values(["DEPARTAMENTO","votos"], ascending=[True,False])
-
-# 3) Municipios – totales y % sobre padrón municipal
+# Municipios - totales y padrón
 df_pad_muni = load_padron_municipio()
 df_mesas_fm = df_mesas_all.copy()
 if dept_sel != "(Todos)":
@@ -593,34 +565,144 @@ else:
     muni_res = muni_tot.copy()
 muni_res = muni_res.sort_values(["DEPARTAMENTO", "VOTOS_EMITIDOS"], ascending=[True, False])
 
-# 3.b) Municipios – % por ALIANZA (válidos y padrón)
-muni_ali = (
-    flt.dropna(subset=["ALIANZA"])
-       .groupby(["DEPARTAMENTO","MUNICIPIO","ALIANZA"], as_index=False)["votos"]
-       .sum()
-)
-muni_tot_valid = flt.groupby(["DEPARTAMENTO","MUNICIPIO"], as_index=False)["votos"].sum().rename(columns={"votos":"VOTOS_TOT_MUNI"})
-muni_ali = muni_ali.merge(muni_tot_valid, on=["DEPARTAMENTO","MUNICIPIO"], how="left")
-muni_ali["% sobre válidos (muni)"] = np.where(
-    muni_ali["VOTOS_TOT_MUNI"] > 0,
-    (muni_ali["votos"] / muni_ali["VOTOS_TOT_MUNI"] * 100).round(2),
-    0.0
-)
-if not df_pad_muni.empty:
-    muni_ali["_mkey"] = normalize_name(muni_ali["MUNICIPIO"])
-    muni_ali = muni_ali.merge(df_pad_muni[["_mkey","PADRON"]], on="_mkey", how="left").drop(columns=["_mkey"])
-    muni_ali["PADRON"] = muni_ali["PADRON"].fillna(0).astype(int)
-    muni_ali["% sobre padrón (muni)"] = np.where(
-        muni_ali["PADRON"] > 0,
-        (muni_ali["votos"] / muni_ali["PADRON"] * 100).round(2),
-        0.0
-    )
-else:
-    muni_ali["PADRON"] = 0
-    muni_ali["% sobre padrón (muni)"] = 0.0
-muni_ali = muni_ali.sort_values(["DEPARTAMENTO","MUNICIPIO","votos"], ascending=[True,True,False])
+# ====== PESTAÑAS ======
+tab_ali, tab_dept, tab_muni, tab_testigo, tab_mesas, tab_diag = st.tabs([
+    "🧩 Alianzas",
+    "🏙️ Departamentos",
+    "🏘️ Municipios",
+    "⭐ Testigo",
+    "🗃️ Mesas (detalle)",
+    "🔧 Diagnóstico",
+])
 
-# 4) Testigo
+# ---------------- Alianzas (global filtrado) ----------------
+with tab_ali:
+    ali_df = (
+        flt.dropna(subset=["ALIANZA"])
+           .groupby("ALIANZA", as_index=False)["votos"].sum()
+           .sort_values("votos", ascending=False)
+    )
+    if not ali_df.empty:
+        ali_df["% sobre válidos"] = (ali_df["votos"] / ali_df["votos"].sum() * 100).round(2)
+    c1, c2 = st.columns([2, 1.2])
+    with c1:
+        st.markdown("#### Votos por Alianza (filtros aplicados)")
+        if not ali_df.empty:
+            st.bar_chart(ali_df.set_index("ALIANZA")["% sobre válidos"], width='stretch')
+        else:
+            st.info("Sin datos de alianzas para el filtro.")
+    with c2:
+        st.markdown("#### Tabla")
+        st.dataframe(ali_df, width='stretch')
+
+# ---------------- Departamentos ----------------
+with tab_dept:
+    st.markdown("### % de votos por Alianza - Departamento seleccionado")
+
+    # Elegir departamento para mostrar % (si está '(Todos)')
+    if dept_sel == "(Todos)":
+        dept_opts = sorted(long["DEPARTAMENTO"].dropna().unique().tolist())
+        if not dept_opts:
+            st.info("No hay departamentos para mostrar.")
+        else:
+            dept_for_chart = st.selectbox("Elegí un departamento", dept_opts, key="dept_for_pct")
+    else:
+        dept_for_chart = dept_sel
+
+    # Calcular % por alianza del departamento elegido
+    if dept_for_chart:
+        dsel = flt[flt["DEPARTAMENTO"] == dept_for_chart]
+        ali_dep = (
+            dsel.dropna(subset=["ALIANZA"])
+                .groupby("ALIANZA", as_index=False)["votos"].sum()
+                .sort_values("votos", ascending=False)
+        )
+        if not ali_dep.empty:
+            ali_dep["% sobre válidos"] = (ali_dep["votos"] / ali_dep["votos"].sum() * 100).round(2)
+            c1, c2 = st.columns([2, 1.2])
+            with c1:
+                st.bar_chart(ali_dep.set_index("ALIANZA")["% sobre válidos"], width='stretch')
+            with c2:
+                st.dataframe(ali_dep, width='stretch')
+        else:
+            st.info("Sin datos de alianzas para el departamento elegido con los filtros actuales.")
+
+    st.markdown("---")
+    st.markdown("#### Totales por Departamento y % sobre padrón")
+    c1, c2 = st.columns([2, 1.2])
+    with c1:
+        if not dept_res.empty:
+            st.bar_chart(dept_res.set_index("DEPARTAMENTO")["VOTOS_EMITIDOS"], width='stretch')
+        else:
+            st.info("Sin datos por departamento.")
+    with c2:
+        st.dataframe(dept_res[["DEPARTAMENTO", "VOTOS_EMITIDOS", "PADRON", "% SOBRE PADRON"]], width='stretch')
+
+    st.markdown("#### Matriz - % por Alianza dentro de cada Departamento (sobre válidos)")
+    dept_pct_valid = pivot_pct_valid(flt, ["DEPARTAMENTO"])
+    st.dataframe(dept_pct_valid, width='stretch')
+
+# ---------------- Municipios ----------------
+with tab_muni:
+    st.markdown("### % de votos por Alianza - Municipio seleccionado")
+
+    # Armar opciones de municipio según filtros
+    if dept_sel != "(Todos)":
+        muni_opts = sorted(long.loc[long["DEPARTAMENTO"] == dept_sel, "MUNICIPIO"].dropna().unique().tolist())
+    else:
+        muni_opts = sorted(long["MUNICIPIO"].dropna().unique().tolist())
+
+    # Elegir municipio (si no está ya seleccionado uno específico)
+    if muni_sel == "(Todos)":
+        if muni_opts:
+            muni_for_chart = st.selectbox("Elegí un municipio", muni_opts, key="muni_for_pct")
+        else:
+            muni_for_chart = None
+    else:
+        muni_for_chart = muni_sel
+
+    # Calcular % por alianza del municipio elegido
+    if muni_for_chart:
+        msel = flt[flt["MUNICIPIO"] == muni_for_chart]
+        if dept_sel != "(Todos)":
+            msel = msel[msel["DEPARTAMENTO"] == dept_sel]
+        ali_muni = (
+            msel.dropna(subset=["ALIANZA"])
+                .groupby("ALIANZA", as_index=False)["votos"].sum()
+                .sort_values("votos", ascending=False)
+        )
+        if not ali_muni.empty:
+            ali_muni["% sobre válidos"] = (ali_muni["votos"] / ali_muni["votos"].sum() * 100).round(2)
+            c1, c2 = st.columns([2, 1.2])
+            with c1:
+                st.bar_chart(ali_muni.set_index("ALIANZA")["% sobre válidos"], width='stretch')
+            with c2:
+                st.dataframe(ali_muni, width='stretch')
+        else:
+            st.info("Sin datos de alianzas para el municipio elegido con los filtros actuales.")
+    else:
+        st.info("Seleccioná un municipio para ver el % por alianza.")
+
+    st.markdown("---")
+    st.markdown("#### Totales por Municipio y % sobre padrón municipal")
+    c1, c2 = st.columns([2, 1.4])
+    with c1:
+        show = muni_res if dept_sel == "(Todos)" else muni_res[muni_res["DEPARTAMENTO"] == dept_sel]
+        if not show.empty:
+            st.bar_chart(show.set_index("MUNICIPIO")["VOTOS_EMITIDOS"], width='stretch')
+        else:
+            st.info("Sin municipios para el filtro actual.")
+    with c2:
+        cols = ["DEPARTAMENTO", "MUNICIPIO", "VOTOS_EMITIDOS"]
+        if "PADRON" in muni_res.columns:
+            cols += ["PADRON", "% SOBRE PADRON"]
+        st.dataframe(muni_res[cols], width='stretch')
+
+    st.markdown("#### Matriz - % por Alianza dentro de cada Municipio (sobre válidos)")
+    muni_pct_valid = pivot_pct_valid(flt, ["DEPARTAMENTO", "MUNICIPIO"])
+    st.dataframe(muni_pct_valid, width='stretch')
+
+# ---------------- Testigo ----------------
 testigo_flt = flt.loc[flt["TESTIGO_BOOL"] == True].copy()
 ali_testigo = pd.DataFrame()
 if not testigo_flt.empty:
@@ -631,7 +713,18 @@ if not testigo_flt.empty:
     )
     ali_testigo["% sobre válidos"] = (ali_testigo["votos"] / ali_testigo["votos"].sum() * 100).round(2)
 
-# 5) Mesas (detalle) + % de mesas escrutadas
+with tab_testigo:
+    st.markdown("#### Solo Mesas Testigo - % por Alianza")
+    c1, c2 = st.columns([2, 1.2])
+    with c1:
+        if not ali_testigo.empty:
+            st.bar_chart(ali_testigo.set_index("ALIANZA")["% sobre válidos"], width='stretch')
+        else:
+            st.info("No hay mesas testigo con datos bajo los filtros seleccionados.")
+    with c2:
+        st.dataframe(ali_testigo, width='stretch')
+
+# ---------------- Mesas (detalle) ----------------
 pivot_all = (
     flt.dropna(subset=["ALIANZA"])
        .pivot_table(index=["MESA_KEY", "DEPARTAMENTO", "MUNICIPIO", "ESTABLECIMIENTO", "TESTIGO_BOOL"],
@@ -643,7 +736,12 @@ total_mesas_plan = int(df_esc["MESA_KEY"].nunique())
 mesas_escrutadas = int(df_mesas_all.loc[df_mesas_all["TOTAL_MESA"] > 0, "MESA_KEY"].nunique())
 pct_mesas_escrutadas = (mesas_escrutadas / total_mesas_plan * 100) if total_mesas_plan > 0 else 0.0
 
-# Diagnóstico: mesas duplicadas
+with tab_mesas:
+    st.markdown("#### Detalle por Mesa (todas las alianzas)")
+    st.dataframe(pivot_all, height=520, width='stretch')
+    st.caption(f"% de mesas escrutadas (provincial): {mesas_escrutadas} / {total_mesas_plan} = {pct_mesas_escrutadas:.2f}%")
+
+# ---------------- Diagnóstico ----------------
 raw_mesa_col = "Mesa" if "Mesa" in df_raw.columns else (find_col(df_raw, r"^\s*mesa\s*$") or "Mesa")
 df_raw["_MESA_KEY"] = normalize_mesa(df_raw.get(raw_mesa_col, pd.Series(index=df_raw.index)))
 ser_mesas = df_raw["_MESA_KEY"].dropna().astype("Int64")
@@ -656,95 +754,6 @@ dupes_count = dupes_count.loc[dupes_count["CANTIDAD_CARGAS"] > 1].sort_values(
     by=["CANTIDAD_CARGAS", "MESA_KEY"], ascending=[False, True]
 ).reset_index(drop=True)
 
-# ================== TABS ==================
-tab_ali, tab_dept, tab_muni, tab_testigo, tab_mesas, tab_diag = st.tabs([
-    "🧩 Alianzas",
-    "🏙️ Departamentos",
-    "🏘️ Municipios",
-    "⭐ Testigo",
-    "🗃️ Mesas (detalle)",
-    "🔧 Diagnóstico",
-])
-
-with tab_ali:
-    c1, c2 = st.columns([2, 1.2])
-    with c1:
-        st.markdown("#### Votos por Alianza")
-        if not ali_df.empty:
-            st.bar_chart(ali_df.set_index("ALIANZA")["votos"], width='stretch')
-        else:
-            st.info("Sin datos de alianzas para el filtro.")
-    with c2:
-        st.markdown("#### Tabla")
-        st.dataframe(ali_df, width='stretch')
-
-with tab_dept:
-    st.markdown("#### Resultados por Departamento (totales y % sobre padrón)")
-    c1, c2 = st.columns([2, 1.2])
-    with c1:
-        if not dept_res.empty:
-            st.bar_chart(dept_res.set_index("DEPARTAMENTO")["VOTOS_EMITIDOS"], width='stretch')
-        else:
-            st.info("Sin datos por departamento.")
-    with c2:
-        st.dataframe(dept_res[["DEPARTAMENTO", "VOTOS_EMITIDOS", "PADRON", "% SOBRE PADRON"]], width='stretch')
-
-    st.markdown("#### % por Alianza dentro de cada Departamento (sobre válidos)")
-    dept_pct_valid = pivot_pct_valid(flt, ["DEPARTAMENTO"])
-    st.dataframe(dept_pct_valid, width='stretch')
-
-    st.markdown("#### % por Alianza sobre padrón (Departamento)")
-    dept_pct_padron = pivot_pct_padron_depto(flt)
-    if dept_pct_padron.empty:
-        st.info("No se encontró Padron_Departamento_raw para calcular % sobre padrón.")
-    else:
-        st.dataframe(dept_pct_padron, width='stretch')
-
-with tab_muni:
-    st.markdown("#### Resultados por Municipio (totales y % sobre padrón municipal)")
-    c1, c2 = st.columns([2, 1.4])
-    with c1:
-        if not muni_res.empty:
-            show = muni_res if dept_sel == "(Todos)" else muni_res[muni_res["DEPARTAMENTO"] == dept_sel]
-            if show.empty:
-                st.info("Sin municipios para el filtro actual.")
-            else:
-                st.bar_chart(show.set_index("MUNICIPIO")["VOTOS_EMITIDOS"], width='stretch')
-        else:
-            st.info("Sin datos de municipios.")
-    with c2:
-        cols = ["DEPARTAMENTO", "MUNICIPIO", "VOTOS_EMITIDOS"]
-        if "PADRON" in muni_res.columns:
-            cols += ["PADRON", "% SOBRE PADRON"]
-        st.dataframe(muni_res[cols], width='stretch')
-
-    st.markdown("#### % por Alianza dentro de cada Municipio (sobre válidos)")
-    muni_pct_valid = pivot_pct_valid(flt, ["DEPARTAMENTO", "MUNICIPIO"])
-    st.dataframe(muni_pct_valid, width='stretch')
-
-    st.markdown("#### % por Alianza sobre padrón (Municipio)")
-    muni_pct_padron = pivot_pct_padron_muni(flt)
-    if muni_pct_padron.empty:
-        st.info("No se encontró Padron_Municipio_raw para calcular % sobre padrón.")
-    else:
-        st.dataframe(muni_pct_padron, width='stretch')
-
-with tab_testigo:
-    st.markdown("#### Solo Mesas Testigo - Votos por Alianza")
-    c1, c2 = st.columns([2, 1.2])
-    with c1:
-        if not ali_testigo.empty:
-            st.bar_chart(ali_testigo.set_index("ALIANZA")["votos"], width='stretch')
-        else:
-            st.info("No hay mesas testigo con datos bajo los filtros seleccionados.")
-    with c2:
-        st.dataframe(ali_testigo, width='stretch')
-
-with tab_mesas:
-    st.markdown("#### Detalle por Mesa (todas las alianzas)")
-    st.dataframe(pivot_all, height=520, width='stretch')
-    st.caption(f"% de mesas escrutadas (provincial): {mesas_escrutadas} / {total_mesas_plan} = {pct_mesas_escrutadas:.2f}%")
-
 with tab_diag:
     st.markdown("#### Mesas duplicadas en Respuestas_raw")
     if not dupes_count.empty:
@@ -752,16 +761,11 @@ with tab_diag:
         st.info("Revisar estas mesas en Respuestas_raw para resolver duplicidad.")
     else:
         st.success("No se detectaron mesas duplicadas.")
-    st.markdown("#### Discrepancias de Departamento (Escuelas vs Mapeo_Mesa_Municipio_raw)")
-    if not dept_mismatch.empty:
-        st.dataframe(dept_mismatch.sort_values("MESA_KEY"), width='stretch')
-        st.warning("Hay mesas cuyo DEPARTAMENTO difiere entre Mapeo_Escuelas_raw y Mapeo_Mesa_Municipio_raw.")
-    else:
-        st.success("No se detectaron discrepancias de departamento.")
 
 # ================== FOOTER ==================
 st.markdown("---")
 st.caption(f"Mesas cargadas (TOTAL_MESA > 0): {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
+
 
 
 
