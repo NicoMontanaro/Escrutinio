@@ -465,7 +465,7 @@ def prep_data():
     return df_raw, df_esc, df_ali, long, df_mesas_all, dept_mismatch, df_muni_plan
 
 # ================== UI ==================
-st.title("📊 Escrutinio - Alianzas, Departamentos y Municipios")
+st.title("📊 Escrutinio - CENTRO DE COMPUTOS ECO")
 st.caption(f"Actualiza cada {AUTOREFRESH_SEC}s (cache TTL)")
 
 # Auto-refresh
@@ -803,50 +803,52 @@ with tab_mesas:
     )
     st.altair_chart(chart_dept, use_container_width=True)
 
-    # Municipios: planificadas vs escrutadas (si hay mapeo)
+    # Municipios: planificadas vs escrutadas (scrollable con barras de progreso)
     if not df_muni_plan.empty:
+        st.markdown("##### Municipios — Mesas escrutadas / planificadas")
+
         muni_plan = (
-            df_muni_plan[["DEPARTAMENTO","MUNICIPIO","MESA_KEY"]].dropna().drop_duplicates()
-                       .groupby(["DEPARTAMENTO","MUNICIPIO"], as_index=False)["MESA_KEY"].nunique()
-                       .rename(columns={"MESA_KEY":"PLANIFICADAS"})
+            df_muni_plan[["DEPARTAMENTO","MUNICIPIO","MESA_KEY"]]
+            .dropna()
+            .drop_duplicates()
+            .groupby(["DEPARTAMENTO","MUNICIPIO"], as_index=False)["MESA_KEY"]
+            .nunique()
+            .rename(columns={"MESA_KEY": "PLANIFICADAS"})
         )
         muni_scru = (
-            df_mesas_all.loc[df_mesas_all["TOTAL_MESA"]>0, ["DEPARTAMENTO","MUNICIPIO","MESA_KEY"]]
-                        .dropna(subset=["MUNICIPIO"]).drop_duplicates()
-                        .groupby(["DEPARTAMENTO","MUNICIPIO"], as_index=False)["MESA_KEY"].nunique()
-                        .rename(columns={"MESA_KEY":"ESCRUTADAS"})
+            df_mesas_all.loc[df_mesas_all["TOTAL_MESA"] > 0, ["DEPARTAMENTO","MUNICIPIO","MESA_KEY"]]
+            .dropna(subset=["MUNICIPIO"])
+            .drop_duplicates()
+            .groupby(["DEPARTAMENTO","MUNICIPIO"], as_index=False)["MESA_KEY"]
+            .nunique()
+            .rename(columns={"MESA_KEY": "ESCRUTADAS"})
         )
+
         prog_muni = muni_plan.merge(muni_scru, on=["DEPARTAMENTO","MUNICIPIO"], how="left").fillna(0)
         prog_muni["RESTANTES"] = (prog_muni["PLANIFICADAS"] - prog_muni["ESCRUTADAS"]).clip(lower=0).astype(int)
-        prog_muni["% ESCRUTADAS"] = np.where(prog_muni["PLANIFICADAS"]>0, (prog_muni["ESCRUTADAS"]/prog_muni["PLANIFICADAS"]*100).round(2), 0.0)
-        prog_muni = prog_muni.sort_values(["DEPARTAMENTO","% ESCRUTADAS"], ascending=[True, False]).reset_index(drop=True)
+        prog_muni["% ESCRUTADAS"] = np.where(
+            prog_muni["PLANIFICADAS"] > 0,
+            (prog_muni["ESCRUTADAS"] / prog_muni["PLANIFICADAS"] * 100).round(2),
+            0.0,
+        )
 
-        st.markdown("##### Municipios — Mesas escrutadas / planificadas")
-        top_muni = prog_muni.copy()
-        if len(top_muni) > 25:
-            top_muni = top_muni.groupby("DEPARTAMENTO", group_keys=False).head(10)
-        muni_long = top_muni.melt(
-            id_vars=["DEPARTAMENTO","MUNICIPIO","PLANIFICADAS","% ESCRUTADAS"],
-            value_vars=["ESCRUTADAS","RESTANTES"], var_name="Estado", value_name="Mesas"
+        dept_opts_muni = ["(Todos)"] + sorted(prog_muni["DEPARTAMENTO"].unique().tolist())
+        dept_choice = st.selectbox(
+            "Filtrar por departamento", dept_opts_muni, index=0, key="muni_prog_dept"
         )
-        base = (
-            alt.Chart(muni_long)
-            .mark_bar()
-            .encode(
-                y=alt.Y("MUNICIPIO:N", sort="-x", title="", axis=alt.Axis(labelLimit=220)),
-                x=x_norm,  # misma escala 0–100%
-                color=alt.Color("Estado:N",
-                    scale=alt.Scale(domain=["ESCRUTADAS","RESTANTES"], range=["#43A047","#BDBDBD"]),
-                    legend=None),
-                tooltip=["DEPARTAMENTO","MUNICIPIO","PLANIFICADAS",
-                         alt.Tooltip("Mesas:Q", title="Cantidad"), "Estado",
-                         alt.Tooltip("% ESCRUTADAS:Q", format=".2f")]
-            )
+        view = prog_muni if dept_choice == "(Todos)" else prog_muni[prog_muni["DEPARTAMENTO"] == dept_choice]
+        view = view.sort_values(["DEPARTAMENTO", "% ESCRUTADAS", "MUNICIPIO"], ascending=[True, False, True])
+
+        st.dataframe(
+            view[["DEPARTAMENTO", "MUNICIPIO", "ESCRUTADAS", "PLANIFICADAS", "% ESCRUTADAS"]],
+            use_container_width=True,
+            height=520,  # scroll
+            column_config={
+                "% ESCRUTADAS": st.column_config.ProgressColumn(
+                    "% escrutadas", min_value=0, max_value=100, format="%.2f%%"
+                )
+            },
         )
-        chart_muni = base.facet(
-            row=alt.Row("DEPARTAMENTO:N", header=alt.Header(labelAngle=0, labelFontSize=12))
-        ).resolve_scale(x="shared")
-        st.altair_chart(chart_muni, use_container_width=True)
     else:
         st.info("Para progreso por municipio se requiere 'Mapeo_Mesa_Municipio_raw'.")
 
@@ -926,4 +928,5 @@ with tab_diag:
 # ================== FOOTER GLOBAL ==================
 st.markdown("---")
 st.caption(f"Mesas cargadas: {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
+
 
