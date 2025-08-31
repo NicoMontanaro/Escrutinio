@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 Escrutinio - Dashboard Streamlit
-Incluye pestaña de Municipios (usa Mapeo_Mesa_Municipio_raw) y cálculo de % escrutado.
+Regla solicitada:
+- DEPARTAMENTO: siempre desde Mapeo_Escuelas_raw
+- MUNICIPIO:   siempre desde Mapeo_Mesa_Municipio_raw
 
-Google Sheet requerido (mismo ID para todas las hojas):
+Google Sheet (mismo ID para todas las hojas):
   - Respuestas_raw
   - Mapeo_Escuelas_raw                 -> DEPARTAMENTO | ESTABLECIMIENTO | MESA | TESTIGO
   - Mapeo_Alianzas_raw                 -> numero | Partidos políticos | orden | Alianza
@@ -41,11 +43,11 @@ SHEET_NAMES = {
     "mesa_muni": "Mapeo_Mesa_Municipio_raw",
 }
 AUTOREFRESH_SEC = 180      # 3 minutos
-TOTAL_MESAS_PROV = 2808    # objetivo (footer)
+TOTAL_MESAS_PROV = 2808    # para footer
 
 st.set_page_config(page_title="Escrutinio - Dashboard", layout="wide")
 
-# ================== PADRON FALLBACK ==================
+# ================== PADRON FALLBACK (si no hay hoja en el sheet) ==================
 PADRON_FALLBACK = [
     {"DEPARTAMENTO": "Capital", "PADRON": 313265},
     {"DEPARTAMENTO": "Goya", "PADRON": 81590},
@@ -76,7 +78,7 @@ PADRON_FALLBACK = [
 
 # ================== GOOGLE SHEETS CLIENT ==================
 def _normalize_private_key(pk: str) -> str:
-    """Normaliza la clave PEM para evitar errores base64."""
+    """Normaliza la clave PEM para evitar errores base64 por saltos de linea mal puestos."""
     if not isinstance(pk, str):
         return pk
     s = pk.strip().replace("\\r\\n", "\n").replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n")
@@ -208,7 +210,7 @@ def normalize_mesa(s: pd.Series) -> pd.Series:
 
 def bool_from_any(s: pd.Series) -> pd.Series:
     up = s.astype(str).str.upper().str.strip()
-    return up.isin(["TRUE", "1", "SI", "SÍ", "YES", "VERDADERO"])
+    return up.isin(["TRUE", "1", "SI", "SÍ", "YES, TRUE", "VERDADERO", "VERDADERA", "YES"])
 
 def find_col(df: pd.DataFrame, regex: str) -> str | None:
     for c in df.columns:
@@ -269,7 +271,7 @@ def mesa_totales(df_raw: pd.DataFrame) -> pd.DataFrame:
         ).fillna(0).astype(int)
         return df_tot[["MESA_KEY", "TOTAL_MESA"]]
 
-# ================== PREP PIPELINE ==================
+# ================== PREP PIPELINE (REGLA NUEVA) ==================
 def prep_data():
     df_raw, df_esc, df_ali, df_muni = load_data()
     if df_raw.empty: st.warning("Respuestas_raw está vacío.")
@@ -277,13 +279,13 @@ def prep_data():
     if df_ali.empty: st.warning("Mapeo_Alianzas_raw está vacío.")
     if df_muni.empty: st.info("Mapeo_Mesa_Municipio_raw está vacío o no existe.")
 
-    # Escuelas (depto/testigo)
+    # Escuelas -> DEPARTAMENTO / TESTIGO / ESTABLECIMIENTO
     mesa_esc_col = "MESA" if "MESA" in df_esc.columns else find_col(df_esc, r"\bmesa\b")
     df_esc["MESA_KEY"] = normalize_mesa(df_esc[mesa_esc_col]) if mesa_esc_col else pd.Series(dtype="Int64")
     test_col = "TESTIGO" if "TESTIGO" in df_esc.columns else find_col(df_esc, r"testig")
     df_esc["TESTIGO_BOOL"] = bool_from_any(df_esc[test_col]) if test_col else False
 
-    # Municipios
+    # Municipios (usaremos solo MUNICIPIO en el merge)
     df_muni_norm = pd.DataFrame(columns=["MESA_KEY", "MUNICIPIO", "DEPARTAMENTO"])
     if not df_muni.empty:
         df_muni_norm = df_muni.copy()
@@ -297,11 +299,12 @@ def prep_data():
         df_muni_norm["MESA_KEY"] = normalize_mesa(df_muni_norm["MESA"])
         df_muni_norm["MUNICIPIO"] = df_muni_norm["MUNICIPIO"].astype(str).str.strip()
         df_muni_norm["DEPARTAMENTO"] = df_muni_norm["DEPARTAMENTO"].astype(str).str.strip()
-        df_muni_norm = (
-            df_muni_norm.dropna(subset=["MESA_KEY"])
-                        .drop_duplicates(subset=["MESA_KEY"])
-                        .loc[:, ["MESA_KEY", "MUNICIPIO", "DEPARTAMENTO"]]
-        )
+        df_muni_norm = df_muni_norm.dropna(subset=["MESA_KEY"]).drop_duplicates(subset=["MESA_KEY"])
+
+    df_muni_only = (
+        df_muni_norm.loc[:, ["MESA_KEY", "MUNICIPIO"]].drop_duplicates("MESA_KEY")
+        if not df_muni_norm.empty else pd.DataFrame(columns=["MESA_KEY", "MUNICIPIO"])
+    )
 
     # Votos long
     parties = detect_party_columns(df_raw)
@@ -314,6 +317,7 @@ def prep_data():
     if not (num_col and ali_col):
         st.error("En Mapeo_Alianzas_raw deben existir columnas 'numero' y 'Alianza'.")
         st.stop()
+
     df_ali["_numero"] = pd.to_numeric(df_ali[num_col], errors="coerce")
     ali_map = df_ali[["_numero", ali_col]].rename(columns={"_numero": "numero_partido", ali_col: "ALIANZA"})
     long = long.merge(ali_map, on="numero_partido", how="left")
@@ -328,82 +332,36 @@ def prep_data():
     else:
         long["PARTIDO"] = long["PARTIDO_NOMBRE_HEADER"]
 
-    # Join con escuelas (depto/testigo/establecimiento)
+    # Merge final de atributos (regla: depto desde Escuelas, municipio desde Mapeo_Mesa_Municipio)
     keep_esc = [c for c in ["DEPARTAMENTO", "ESTABLECIMIENTO", "TESTIGO_BOOL"] if c in df_esc.columns]
-    long = long.merge(df_esc[["MESA_KEY"] + keep_esc].drop_duplicates("MESA_KEY"), on="MESA_KEY", how="left")
-    long["DEPARTAMENTO"] = long["DEPARTAMENTO"].where(long["DEPARTAMENTO"].notna(), "(Sin depto)")
+    long = long.merge(
+        df_esc[["MESA_KEY"] + keep_esc].drop_duplicates("MESA_KEY"),
+        on="MESA_KEY", how="left"
+    )
+    long["DEPARTAMENTO"] = long["DEPARTAMENTO"].fillna("(Sin depto)")
 
-    # ========= MERGE ROBUSTO con Mapeo_Mesa_Municipio_raw =========
-    if not df_muni_norm.empty:
-        long = long.merge(df_muni_norm, on="MESA_KEY", how="left", suffixes=("", "_MAP"))
-
-        muni_right = "MUNICIPIO_MAP" if "MUNICIPIO_MAP" in long.columns else ("MUNICIPIO" if "MUNICIPIO" in long.columns else None)
-        dep_right  = "DEPARTAMENTO_MAP" if "DEPARTAMENTO_MAP" in long.columns else ("DEPARTAMENTO" if "DEPARTAMENTO" in long.columns else None)
-
-        if muni_right:
-            if "MUNICIPIO" not in long.columns or muni_right == "MUNICIPIO":
-                long["MUNICIPIO"] = long[muni_right]
-            else:
-                long["MUNICIPIO"] = long["MUNICIPIO"].where(long["MUNICIPIO"].notna(), long[muni_right])
-        else:
-            if "MUNICIPIO" not in long.columns:
-                long["MUNICIPIO"] = np.nan
-        long["MUNICIPIO"] = long["MUNICIPIO"].fillna("(Sin municipio)")
-
-        if dep_right:
-            long["DEPARTAMENTO"] = long.get("DEPARTAMENTO", np.nan)
-            long["DEPARTAMENTO"] = long["DEPARTAMENTO"].where(
-                long["DEPARTAMENTO"].notna() & (long["DEPARTAMENTO"] != "(Sin depto)"),
-                long[dep_right]
-            )
-
-        for c in ["MUNICIPIO_MAP", "DEPARTAMENTO_MAP"]:
-            if c in long.columns and c not in ["MUNICIPIO", "DEPARTAMENTO"]:
-                long.drop(columns=[c], inplace=True, errors="ignore")
-    else:
-        if "MUNICIPIO" not in long.columns:
-            long["MUNICIPIO"] = "(Sin municipio)"
+    if not df_muni_only.empty:
+        long = long.merge(df_muni_only, on="MESA_KEY", how="left")
+    if "MUNICIPIO" not in long.columns:
+        long["MUNICIPIO"] = np.nan
+    long["MUNICIPIO"] = long["MUNICIPIO"].fillna("(Sin municipio)")
 
     # Totales por mesa
     df_tot = mesa_totales(df_raw)
 
-    # df_mesas_all = TOTAL_MESA + depto/testigo + municipio
+    # df_mesas_all = TOTAL_MESA + DEPARTAMENTO (escuelas) + MUNICIPIO (mapeo)
     df_mesas_all = df_tot.merge(
         df_esc[["MESA_KEY", "DEPARTAMENTO", "TESTIGO_BOOL"]].drop_duplicates("MESA_KEY"),
         on="MESA_KEY", how="left"
     )
     df_mesas_all["DEPARTAMENTO"] = df_mesas_all["DEPARTAMENTO"].fillna("(Sin depto)")
+    if not df_muni_only.empty:
+        df_mesas_all = df_mesas_all.merge(df_muni_only, on="MESA_KEY", how="left")
+    if "MUNICIPIO" not in df_mesas_all.columns:
+        df_mesas_all["MUNICIPIO"] = np.nan
+    df_mesas_all["MUNICIPIO"] = df_mesas_all["MUNICIPIO"].fillna("(Sin municipio)")
 
-    if not df_muni_norm.empty:
-        df_mesas_all = df_mesas_all.merge(df_muni_norm, on="MESA_KEY", how="left", suffixes=("", "_MAP"))
-
-        muni_right = "MUNICIPIO_MAP" if "MUNICIPIO_MAP" in df_mesas_all.columns else ("MUNICIPIO" if "MUNICIPIO" in df_mesas_all.columns else None)
-        dep_right  = "DEPARTAMENTO_MAP" if "DEPARTAMENTO_MAP" in df_mesas_all.columns else ("DEPARTAMENTO" if "DEPARTAMENTO" in df_mesas_all.columns else None)
-
-        if muni_right:
-            if "MUNICIPIO" not in df_mesas_all.columns or muni_right == "MUNICIPIO":
-                df_mesas_all["MUNICIPIO"] = df_mesas_all[muni_right]
-            else:
-                df_mesas_all["MUNICIPIO"] = df_mesas_all["MUNICIPIO"].where(df_mesas_all["MUNICIPIO"].notna(), df_mesas_all[muni_right])
-        else:
-            if "MUNICIPIO" not in df_mesas_all.columns:
-                df_mesas_all["MUNICIPIO"] = np.nan
-        df_mesas_all["MUNICIPIO"] = df_mesas_all["MUNICIPIO"].fillna("(Sin municipio)")
-
-        if dep_right:
-            df_mesas_all["DEPARTAMENTO"] = df_mesas_all["DEPARTAMENTO"].where(
-                df_mesas_all["DEPARTAMENTO"].notna() & (df_mesas_all["DEPARTAMENTO"] != "(Sin depto)"),
-                df_mesas_all[dep_right]
-            )
-
-        for c in ["MUNICIPIO_MAP", "DEPARTAMENTO_MAP"]:
-            if c in df_mesas_all.columns and c not in ["MUNICIPIO", "DEPARTAMENTO"]:
-                df_mesas_all.drop(columns=[c], inplace=True, errors="ignore")
-    else:
-        if "MUNICIPIO" not in df_mesas_all.columns:
-            df_mesas_all["MUNICIPIO"] = "(Sin municipio)"
-
-    # Diagnostico de discrepancias de departamento
+    # Diagnostico de discrepancias (solo para ver)
     dept_mismatch = pd.DataFrame()
     if not df_muni_norm.empty and "DEPARTAMENTO" in df_esc.columns:
         d1 = df_esc[["MESA_KEY", "DEPARTAMENTO"]].drop_duplicates("MESA_KEY").rename(columns={"DEPARTAMENTO": "DEP_ESC"})
@@ -571,7 +529,7 @@ total_mesas_plan = int(df_esc["MESA_KEY"].nunique())
 mesas_escrutadas = int(df_mesas_all.loc[df_mesas_all["TOTAL_MESA"] > 0, "MESA_KEY"].nunique())
 pct_mesas_escrutadas = (mesas_escrutadas / total_mesas_plan * 100) if total_mesas_plan > 0 else 0.0
 
-# Diagnostico: duplicados
+# Diagnostico: duplicados de cargas en el raw
 raw_mesa_col = "Mesa" if "Mesa" in df_raw.columns else (find_col(df_raw, r"^\s*mesa\s*$") or "Mesa")
 df_raw["_MESA_KEY"] = normalize_mesa(df_raw.get(raw_mesa_col, pd.Series(index=df_raw.index)))
 ser_mesas = df_raw["_MESA_KEY"].dropna().astype("Int64")
@@ -668,6 +626,7 @@ with tab_diag:
 # ================== FOOTER ==================
 st.markdown("---")
 st.caption(f"Mesas cargadas (TOTAL_MESA > 0): {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
+
 
 
 
