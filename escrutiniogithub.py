@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Escrutinio - Dashboard Streamlit
-Regla solicitada:
+Regla:
 - DEPARTAMENTO: siempre desde Mapeo_Escuelas_raw
 - MUNICIPIO:   siempre desde Mapeo_Mesa_Municipio_raw
 
@@ -9,7 +9,7 @@ Google Sheet (mismo ID para todas las hojas):
   - Respuestas_raw
   - Mapeo_Escuelas_raw                 -> DEPARTAMENTO | ESTABLECIMIENTO | MESA | TESTIGO
   - Mapeo_Alianzas_raw                 -> numero | Partidos políticos | orden | Alianza
-  - Mapeo_Mesa_Municipio_raw           -> MESA | MUNICIPIO | DEPARTAMENTO
+  - Mapeo_Mesa_Municipio_raw           -> MESA | MUNICIPIO | (DEPARTAMENTO opcional)
   - (opcional) Padron_Departamento_raw -> DEPARTAMENTO | PADRON
   - (opcional) Padron_Municipio_raw    -> (DEPARTAMENTO) | MUNICIPIO | PADRON
 
@@ -136,7 +136,7 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
         try:
             df_muni = _sheet_to_df(gc, SHEET_ID, SHEET_NAMES["mesa_muni"])
         except Exception:
-            df_muni = pd.DataFrame(columns=["MESA", "MUNICIPIO", "DEPARTAMENTO"])
+            df_muni = pd.DataFrame(columns=["MESA", "MUNICIPIO"])
     except Exception as e:
         st.error("No se pudo abrir el Google Sheet. Revisá permisos, nombres de hoja y APIs habilitadas.\n\n" + str(e))
         st.stop()
@@ -210,7 +210,7 @@ def normalize_mesa(s: pd.Series) -> pd.Series:
 
 def bool_from_any(s: pd.Series) -> pd.Series:
     up = s.astype(str).str.upper().str.strip()
-    return up.isin(["TRUE", "1", "SI", "SÍ", "YES, TRUE", "VERDADERO", "VERDADERA", "YES"])
+    return up.isin(["TRUE", "1", "SI", "SÍ", "YES", "VERDADERO"])
 
 def find_col(df: pd.DataFrame, regex: str) -> str | None:
     for c in df.columns:
@@ -285,22 +285,45 @@ def prep_data():
     test_col = "TESTIGO" if "TESTIGO" in df_esc.columns else find_col(df_esc, r"testig")
     df_esc["TESTIGO_BOOL"] = bool_from_any(df_esc[test_col]) if test_col else False
 
-    # Municipios (usaremos solo MUNICIPIO en el merge)
-    df_muni_norm = pd.DataFrame(columns=["MESA_KEY", "MUNICIPIO", "DEPARTAMENTO"])
+    # Municipios (robusto, DEPARTAMENTO puede NO existir)
+    df_muni_norm = pd.DataFrame(columns=["MESA_KEY", "MUNICIPIO"])
     if not df_muni.empty:
-        df_muni_norm = df_muni.copy()
-        ren = {}
-        for c in df_muni_norm.columns:
-            u = c.strip().upper()
-            if u == "MESA" and c != "MESA": ren[c] = "MESA"
-            if u == "MUNICIPIO" and c != "MUNICIPIO": ren[c] = "MUNICIPIO"
-            if u == "DEPARTAMENTO" and c != "DEPARTAMENTO": ren[c] = "DEPARTAMENTO"
-        if ren: df_muni_norm = df_muni_norm.rename(columns=ren)
-        df_muni_norm["MESA_KEY"] = normalize_mesa(df_muni_norm["MESA"])
-        df_muni_norm["MUNICIPIO"] = df_muni_norm["MUNICIPIO"].astype(str).str.strip()
-        df_muni_norm["DEPARTAMENTO"] = df_muni_norm["DEPARTAMENTO"].astype(str).str.strip()
-        df_muni_norm = df_muni_norm.dropna(subset=["MESA_KEY"]).drop_duplicates(subset=["MESA_KEY"])
+        dm = df_muni.copy()
 
+        # Normaliza nombres de columnas a mayúsculas sin espacios extremos
+        dm.columns = [str(c).strip() for c in dm.columns]
+        upper_map = {c: c.strip().upper() for c in dm.columns}
+        dm.rename(columns=upper_map, inplace=True)
+
+        # Fuzzy fallback por si los encabezados vienen raros
+        def _findcol(cols, pattern):
+            for c in cols:
+                if re.search(pattern, c, re.I):
+                    return c
+            return None
+
+        mesa_c = "MESA" if "MESA" in dm.columns else _findcol(dm.columns, r"\bmesa\b")
+        muni_c = "MUNICIPIO" if "MUNICIPIO" in dm.columns else _findcol(dm.columns, r"munic")
+        dep_c  = "DEPARTAMENTO" if "DEPARTAMENTO" in dm.columns else _findcol(dm.columns, r"depart")
+
+        if not mesa_c or not muni_c:
+            st.error("Mapeo_Mesa_Municipio_raw debe contener columnas 'MESA' y 'MUNICIPIO'.")
+            st.stop()
+
+        dm["MESA_KEY"] = normalize_mesa(dm[mesa_c])
+        dm["MUNICIPIO"] = dm[muni_c].astype(str).str.strip()
+        if dep_c:
+            dm["DEPARTAMENTO"] = dm[dep_c].astype(str).str.strip()  # opcional
+
+        dm = dm.dropna(subset=["MESA_KEY"]).drop_duplicates(subset=["MESA_KEY"])
+
+        # Solo usaremos MESA_KEY + MUNICIPIO en la app (regla definida)
+        keep_cols = ["MESA_KEY", "MUNICIPIO"]
+        if "DEPARTAMENTO" in dm.columns:
+            keep_cols.append("DEPARTAMENTO")  # lo dejamos para diagnóstico, si existe
+        df_muni_norm = dm[keep_cols].copy()
+
+    # Vista solo de MUNICIPIO para el merge de datos
     df_muni_only = (
         df_muni_norm.loc[:, ["MESA_KEY", "MUNICIPIO"]].drop_duplicates("MESA_KEY")
         if not df_muni_norm.empty else pd.DataFrame(columns=["MESA_KEY", "MUNICIPIO"])
@@ -361,9 +384,9 @@ def prep_data():
         df_mesas_all["MUNICIPIO"] = np.nan
     df_mesas_all["MUNICIPIO"] = df_mesas_all["MUNICIPIO"].fillna("(Sin municipio)")
 
-    # Diagnostico de discrepancias (solo para ver)
+    # Diagnostico de discrepancias (solo si existe DEPARTAMENTO en el mapeo municipal)
     dept_mismatch = pd.DataFrame()
-    if not df_muni_norm.empty and "DEPARTAMENTO" in df_esc.columns:
+    if (not df_muni_norm.empty) and ("DEPARTAMENTO" in df_muni_norm.columns) and ("DEPARTAMENTO" in df_esc.columns):
         d1 = df_esc[["MESA_KEY", "DEPARTAMENTO"]].drop_duplicates("MESA_KEY").rename(columns={"DEPARTAMENTO": "DEP_ESC"})
         d2 = df_muni_norm[["MESA_KEY", "DEPARTAMENTO"]].drop_duplicates("MESA_KEY").rename(columns={"DEPARTAMENTO": "DEP_MAP"})
         mm = d1.merge(d2, on="MESA_KEY", how="inner")
@@ -626,6 +649,7 @@ with tab_diag:
 # ================== FOOTER ==================
 st.markdown("---")
 st.caption(f"Mesas cargadas (TOTAL_MESA > 0): {mesas_escrutadas} / {TOTAL_MESAS_PROV}")
+
 
 
 
