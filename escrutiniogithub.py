@@ -30,7 +30,7 @@ import streamlit as st
 import altair as alt
 
 # ================== CONFIG ==================
-SHEET_ID = "1vYiQvkDqdx-zgtRbNPN5_0l2lXAceTF2py4mlM1pK_U"
+SHEET_ID = "SHEET ID"
 SHEET_NAMES = {
     "raw": "Respuestas_raw",
     "escuelas": "Mapeo_Escuelas_raw",
